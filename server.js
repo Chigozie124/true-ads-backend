@@ -1,107 +1,104 @@
+// server.js
 import express from "express";
-import cors from "cors";
+import fetch from "node-fetch";
 import dotenv from "dotenv";
-import fetch from "node-fetch"; // we'll use fetch for Paystack API calls
-import { initializeApp } from "firebase/app";
-import { getFirestore, doc, updateDoc, getDoc } from "firebase/firestore";
 
 dotenv.config();
 
-// Firebase config (use your Firebase settings)
-const firebaseConfig = {
-  apiKey: "YOUR_FIREBASE_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "SENDER_ID",
-  appId: "APP_ID",
-};
-
 const app = express();
-app.use(cors());
-app.use(express.json()); // Important: to parse JSON bodies
+app.use(express.json());
 
-// Firestore init
-initializeApp(firebaseConfig);
-const db = getFirestore();
+// ===============================
+// Config
+// ===============================
+const PORT = process.env.PORT || 3000;
+const PAYSTACK_MODE = process.env.PAYSTACK_MODE || "test";
 
-// Get keys depending on mode
-const mode = process.env.PAYSTACK_MODE || "test";
-const secretKey =
-  mode === "live"
+const PAYSTACK_SECRET_KEY =
+  PAYSTACK_MODE === "live"
     ? process.env.PAYSTACK_LIVE_SECRET_KEY
     : process.env.PAYSTACK_TEST_SECRET_KEY;
 
-if (!secretKey) {
+const DEFAULT_EMAIL = process.env.DEFAULT_EMAIL || "chigozieonueze@gmail.com";
+const DEFAULT_AMOUNT = process.env.DEFAULT_AMOUNT || 10000; // NGN in kobo
+
+if (!PAYSTACK_SECRET_KEY) {
   console.error("❌ Paystack secret key missing");
 }
 
-// Initialize payment endpoint
+// Helper for headers
+const paystackHeaders = {
+  Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+  "Content-Type": "application/json",
+};
+
+// ===============================
+// Routes
+// ===============================
+
+// Home test route
+app.get("/", (req, res) => {
+  res.json({ status: true, message: "Server is running", mode: PAYSTACK_MODE });
+});
+
+// Initialize payment
 app.post("/initialize-payment", async (req, res) => {
   try {
     const { email, amount } = req.body || {};
-    if (!email || !amount) {
-      return res.status(400).json({ status: false, message: "Email and amount required" });
-    }
+    const payload = {
+      email: email || DEFAULT_EMAIL,
+      amount: amount || DEFAULT_AMOUNT, // Paystack expects kobo
+    };
 
-    // Create payment on Paystack
     const response = await fetch("https://api.paystack.co/transaction/initialize", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${secretKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        email,
-        amount: amount * 100, // Paystack uses kobo
-        callback_url: "http://localhost:3000/verify-payment", // redirect after payment
-      }),
+      headers: paystackHeaders,
+      body: JSON.stringify(payload),
     });
 
     const data = await response.json();
+
     if (data.status) {
-      return res.json({
+      res.json({
         status: true,
         message: "Authorization URL created",
         data: data.data,
       });
     } else {
-      return res.json({ status: false, message: data.message || "Failed to initialize payment" });
+      res.json({ status: false, message: "Failed to initialize payment", error: data });
     }
   } catch (err) {
     console.error(err);
-    res.status(500).json({ status: false, message: "Server error" });
+    res.json({ status: false, message: "Server error", error: err.message });
   }
 });
 
-// Verify payment endpoint
-app.get("/verify-payment/:reference/:uid", async (req, res) => {
+// Verify payment
+app.get("/verify-payment/:reference", async (req, res) => {
   try {
-    const { reference, uid } = req.params;
-    if (!reference || !uid) return res.status(400).json({ status: false, message: "Reference & UID required" });
-
+    const { reference } = req.params;
     const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-      headers: { Authorization: `Bearer ${secretKey}` },
+      method: "GET",
+      headers: paystackHeaders,
     });
+
     const data = await response.json();
 
-    if (data.status && data.data.status === "success") {
-      // Update Firestore user to seller
-      const userRef = doc(db, "users", uid);
-      await updateDoc(userRef, { seller: true });
-      return res.json({ status: true, message: "Payment successful, user upgraded to seller" });
+    if (data.status) {
+      // Here you can add logic to handle seller upgrade, commission, delivery, disputes, etc.
+      res.json({ status: true, message: "Payment verified", data: data.data });
     } else {
-      return res.json({ status: false, message: "Payment not successful" });
+      res.json({ status: false, message: "Failed to verify payment", error: data });
     }
   } catch (err) {
     console.error(err);
-    res.status(500).json({ status: false, message: "Server error" });
+    res.json({ status: false, message: "Server error", error: err.message });
   }
 });
 
-// Basic test route
-app.get("/", (req, res) => res.send("Backend running"));
-
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`Server running on http://localhost:${process.env.PORT || 3000} | Mode: ${mode}`)
-);
+// ===============================
+// Start server
+// ===============================
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT} | Mode: ${PAYSTACK_MODE}`);
+});
