@@ -11,11 +11,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ===============================
-   PAYSTACK MODE HANDLER
-================================ */
+// 🔐 Paystack mode
 const MODE = process.env.PAYSTACK_MODE || "test";
 
+// 🔐 Keys selector
 const PAYSTACK_SECRET_KEY =
   MODE === "live"
     ? process.env.PAYSTACK_LIVE_SECRET_KEY
@@ -26,46 +25,37 @@ const PAYSTACK_PUBLIC_KEY =
     ? process.env.PAYSTACK_LIVE_PUBLIC_KEY
     : process.env.PAYSTACK_TEST_PUBLIC_KEY;
 
-if (!PAYSTACK_SECRET_KEY || !PAYSTACK_PUBLIC_KEY) {
-  console.error("❌ Paystack keys missing");
-}
+if (!PAYSTACK_SECRET_KEY) console.error("❌ Paystack secret key missing");
 
-/* ===============================
-   PAYMENT INIT (ONE ENTRY POINT)
-================================ */
+// ===============================
+// Payment initiation endpoint
+// ===============================
 app.post("/pay/initiate", async (req, res) => {
   try {
     const { email, amount, purpose } = req.body;
 
     if (!email || !amount || !purpose) {
-      return res.status(400).json({
-        status: false,
-        message: "Missing payment data",
-      });
+      return res.status(400).json({ status: false, message: "Missing parameters" });
     }
 
-    const response = await fetch(
-      "https://api.paystack.co/transaction/initialize",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email,
-          amount, // kobo
-          metadata: {
-            purpose, // wallet | upgrade
-          },
-        }),
-      }
-    );
+    // Initialize transaction
+    const response = await fetch("https://api.paystack.co/transaction/initialize", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        amount, // kobo
+        metadata: { purpose }, // "upgrade" or "wallet"
+      }),
+    });
 
     const data = await response.json();
 
     if (!data.status) {
-      return res.status(400).json(data);
+      return res.status(400).json({ status: false, message: "Failed to initialize payment" });
     }
 
     res.json({
@@ -77,13 +67,10 @@ app.post("/pay/initiate", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({
-      status: false,
-      message: "Payment init failed",
-    });
+    res.status(500).json({ status: false, message: "Payment initiation error" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Backend running on ${PORT} (${MODE})`);
+  console.log(`🚀 Backend running on port ${PORT} (${MODE.toUpperCase()} mode)`);
 });
