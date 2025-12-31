@@ -1,19 +1,18 @@
 {
   "name": "true-ads-backend",
   "version": "1.0.0",
-  "description": "Backend server for True Ads Paystack",
+  "description": "Backend server for True Ads Paystack integration",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "express": "^4.21.2",
+    "express": "^5.2.1",
+    "firebase-admin": "^12.7.0",
     "node-fetch": "^3.3.2"
   }
 }
