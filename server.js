@@ -1,8 +1,8 @@
+// server.js
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import dotenv from "dotenv";
-import admin from "firebase-admin";
 
 dotenv.config();
 
@@ -10,15 +10,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔹 Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-  });
-}
-const db = admin.firestore();
+const PORT = process.env.PORT || 3000;
 
-// 🔹 Paystack mode & keys
+// 🔐 Paystack mode selector
 const MODE = process.env.PAYSTACK_MODE || "test";
 
 const PAYSTACK_SECRET_KEY =
@@ -34,39 +28,34 @@ const PAYSTACK_PUBLIC_KEY =
 if (!PAYSTACK_SECRET_KEY) console.error("❌ Paystack secret key missing");
 
 // ===============================
-// 🔹 Initiate payment (upgrade or wallet)
+// 🔹 Initialize payment
 // ===============================
 app.post("/pay/initiate", async (req, res) => {
   try {
     const { email, amount, purpose } = req.body;
-    if (!amount || !email || !purpose)
-      return res.status(400).json({ status: false, message: "Missing data" });
+    if (!amount || !purpose) return res.status(400).json({ status: false, message: "Amount & purpose required" });
 
-    const response = await fetch(
-      "https://api.paystack.co/transaction/initialize",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email,
-          amount,
-          metadata: { purpose },
-        }),
-      }
-    );
+    const response = await fetch("https://api.paystack.co/transaction/initialize", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email,
+        amount,
+        metadata: { purpose },
+      }),
+    });
 
     const data = await response.json();
-
     if (!data.status) return res.status(400).json(data);
 
     res.json({
       status: true,
       reference: data.data.reference,
+      amount: data.data.amount,
       email,
-      amount,
       publicKey: PAYSTACK_PUBLIC_KEY,
     });
   } catch (err) {
@@ -76,59 +65,56 @@ app.post("/pay/initiate", async (req, res) => {
 });
 
 // ===============================
-// 🔹 Verify payment
+// 🔹 Webhook to confirm payment
 // ===============================
-app.post("/pay/verify", async (req, res) => {
-  try {
-    const { reference, uid, purpose } = req.body;
-    if (!reference || !uid || !purpose)
-      return res.status(400).json({ status: false, message: "Missing data" });
+app.post("/pay/webhook", async (req, res) => {
+  const event = req.body;
+  // TODO: Verify Paystack signature header for security
 
-    const response = await fetch(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        },
-      }
-    );
+  if (event.event === "charge.success") {
+    const { metadata, amount, customer } = event.data;
+    const purpose = metadata?.purpose;
+    const email = customer.email;
+
+    // Update Firestore balances based on purpose
+    // Add money, upgrade, purchase, etc.
+    // TODO: Implement Firestore integration here
+    console.log("Payment verified:", purpose, email, amount);
+  }
+
+  res.sendStatus(200);
+});
+
+// ===============================
+// 🔹 Withdraw endpoint
+// ===============================
+app.post("/pay/withdraw", async (req, res) => {
+  try {
+    const { account_number, bank_code, amount, reason } = req.body;
+    if (!account_number || !bank_code || !amount) return res.status(400).json({ status: false, message: "Missing info" });
+
+    const response = await fetch("https://api.paystack.co/transfer", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        source: "balance",
+        reason: reason || "Withdrawal",
+        amount,
+        recipient: account_number, // Paystack recipient code
+      }),
+    });
 
     const data = await response.json();
-    if (!data.status)
-      return res.status(400).json({ status: false, message: "Payment failed" });
-
-    // 🔹 Update Firestore based on purpose
-    const userRef = db.collection("users").doc(uid);
-
-    if (purpose === "upgrade") {
-      await userRef.update({ isSeller: true });
-    } else if (purpose === "wallet") {
-      const snap = await userRef.get();
-      const current = snap.exists && snap.data().balance ? snap.data().balance : 0;
-      await userRef.update({ balance: current + parseInt(data.data.amount) });
-    }
-
-    res.json({ status: true, message: "Payment verified and updated" });
+    res.json(data);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ status: false, message: "Verification failed" });
+    res.status(500).json({ status: false, message: "Withdrawal failed" });
   }
 });
 
-// ===============================
-// 🔹 Future placeholder endpoints
-// ===============================
-app.post("/withdraw", (req, res) => {
-  // Example: check user balance, initiate payout, log transaction
-  res.json({ status: true, message: "Withdraw endpoint ready" });
-});
-
-app.post("/purchase", (req, res) => {
-  // Example: purchase item, deduct balance, log transaction
-  res.json({ status: true, message: "Purchase endpoint ready" });
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`🚀 Backend running on port ${process.env.PORT || 3000} (${MODE} mode)`);
+app.listen(PORT, () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
 });
