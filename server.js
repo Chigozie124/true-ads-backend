@@ -1,113 +1,205 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
-import { initializeApp, cert } from "firebase-admin/app";
-import { getFirestore, doc, getDoc, setDoc } from "firebase-admin/firestore";
+import axios from "axios";
+import admin from "firebase-admin";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔐 Paystack mode & keys
-const MODE = process.env.PAYSTACK_MODE || "test";
-const PAYSTACK_SECRET_KEY =
-  MODE === "live" ? process.env.PAYSTACK_LIVE_SECRET_KEY : process.env.PAYSTACK_TEST_SECRET_KEY;
-const PAYSTACK_PUBLIC_KEY =
-  MODE === "live" ? process.env.PAYSTACK_LIVE_PUBLIC_KEY : process.env.PAYSTACK_TEST_PUBLIC_KEY;
+/* -------------------- Firebase Admin Init -------------------- */
 
-// Firebase Admin
-import adminCred from "./firebase-admin.json" assert { type: "json" };
-initializeApp({ credential: cert(adminCred) });
-const db = getFirestore();
+const __dirname = path.resolve();
 
-// ===============================
-// Initiate payment (upgrade/add money)
-// ===============================
-app.post("/pay/initiate", async (req, res) => {
+const serviceAccount = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "firebase-admin.json"), "utf8")
+);
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
+
+const db = admin.firestore();
+
+/* -------------------- Paystack Config -------------------- */
+
+const PAYSTACK_SECRET =
+  process.env.PAYSTACK_LIVE_SECRET_KEY ||
+  process.env.PAYSTACK_TEST_SECRET_KEY;
+
+if (!PAYSTACK_SECRET) {
+  throw new Error("❌ Paystack secret key not found in env");
+}
+
+/* -------------------- Helpers -------------------- */
+
+function verifyUser(req, res, next) {
+  const uid = req.headers["x-user-id"];
+  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  req.uid = uid;
+  next();
+}
+
+/* -------------------- INIT PAYMENT -------------------- */
+/*
+  Used for:
+  - Add money
+  - Seller upgrade
+*/
+app.post("/pay/init", verifyUser, async (req, res) => {
   try {
-    const { email, amount, purpose } = req.body;
-    if (!email || !amount) return res.status(400).json({ status: false, message: "Missing data" });
+    const { amount, purpose } = req.body;
 
-    const response = await fetch("https://api.paystack.co/transaction/initialize", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    const userDoc = await db.collection("users").doc(req.uid).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userDoc.data();
+
+    const reference = `trueads_${Date.now()}_${req.uid}`;
+
+    const response = await axios.post(
+      "https://api.paystack.co/transaction/initialize",
+      {
+        email: user.email,
+        amount: amount * 100, // Paystack uses kobo
+        reference,
+        metadata: {
+          uid: req.uid,
+          purpose, // "add_money" | "upgrade"
+        },
       },
-      body: JSON.stringify({ email, amount, metadata: { purpose } }),
+      {
+        headers: {
+          Authorization: `Bearer ${PAYSTACK_SECRET}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    res.json({
+      authorization_url: response.data.data.authorization_url,
+      reference,
+    });
+  } catch (err) {
+    console.error("INIT PAYMENT ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "Error starting payment" });
+  }
+});
+
+/* -------------------- PAYSTACK WEBHOOK -------------------- */
+/*
+  This is where REAL money is confirmed
+*/
+app.post("/paystack/webhook", async (req, res) => {
+  try {
+    const event = req.body;
+
+    if (event.event !== "charge.success") {
+      return res.sendStatus(200);
+    }
+
+    const data = event.data;
+    const { uid, purpose } = data.metadata;
+    const amount = data.amount / 100;
+
+    const userRef = db.collection("users").doc(uid);
+
+    if (purpose === "add_money") {
+      await userRef.update({
+        balance: admin.firestore.FieldValue.increment(amount),
+      });
+    }
+
+    if (purpose === "upgrade") {
+      await userRef.update({
+        isSeller: true,
+      });
+    }
+
+    // Ledger (VERY IMPORTANT)
+    await db.collection("transactions").add({
+      uid,
+      amount,
+      purpose,
+      reference: data.reference,
+      status: "success",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    const data = await response.json();
-    if (!data.status) return res.status(400).json(data);
-
-    res.json({ status: true, reference: data.data.reference, email, amount, publicKey: PAYSTACK_PUBLIC_KEY });
+    res.sendStatus(200);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ status: false, message: "Payment initiation failed" });
+    console.error("WEBHOOK ERROR:", err);
+    res.sendStatus(500);
   }
 });
 
-// ===============================
-// Purchase product
-// ===============================
-app.post("/pay/purchase", async (req, res) => {
+/* -------------------- WITHDRAW -------------------- */
+/*
+  Real withdrawal logic (bank details required later)
+*/
+app.post("/withdraw", verifyUser, async (req, res) => {
   try {
-    const { buyerUid, productId } = req.body;
-    if (!buyerUid || !productId) return res.status(400).json({ status: false, message: "Missing buyer or product" });
+    const { amount } = req.body;
 
-    const productSnap = await getDoc(doc(db, "products", productId));
-    if (!productSnap.exists()) return res.status(404).json({ status: false, message: "Product not found" });
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
 
-    const product = productSnap.data();
-    const sellerUid = product.sellerUid;
-    const price = product.price;
+    const userRef = db.collection("users").doc(req.uid);
+    const userSnap = await userRef.get();
 
-    // Commission 10%
-    const commission = Math.floor(price * 0.1);
-    const sellerAmount = price - commission;
+    if (!userSnap.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
-    // Buyer balance check
-    const buyerSnap = await getDoc(doc(db, "users", buyerUid));
-    const buyerBalance = buyerSnap.data().balance || 0;
-    if (buyerBalance < price) return res.status(400).json({ status: false, message: "Insufficient balance" });
-    await setDoc(doc(db, "users", buyerUid), { balance: buyerBalance - price }, { merge: true });
+    const user = userSnap.data();
 
-    // Update seller balance
-    const sellerSnap = await getDoc(doc(db, "users", sellerUid));
-    const sellerBalance = sellerSnap.exists() ? sellerSnap.data().balance || 0 : 0;
-    await setDoc(doc(db, "users", sellerUid), { balance: sellerBalance + sellerAmount }, { merge: true });
+    if ((user.balance || 0) < amount) {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
 
-    // Record transaction
-    await setDoc(doc(db, "transactions", `${buyerUid}_${productId}_${Date.now()}`), {
-      buyerUid, sellerUid, productId, amount: price, commission, sellerAmount, createdAt: new Date(), status: "paid"
+    // HOLD ONLY — actual Paystack transfer comes later
+    await userRef.update({
+      balance: admin.firestore.FieldValue.increment(-amount),
     });
 
-    res.json({ status: true, message: "Purchase successful" });
+    await db.collection("withdrawals").add({
+      uid: req.uid,
+      amount,
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ success: true, message: "Withdrawal queued" });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ status: false, message: "Purchase failed" });
+    console.error("WITHDRAW ERROR:", err);
+    res.status(500).json({ error: "Withdrawal failed" });
   }
 });
 
-// ===============================
-// Withdraw
-// ===============================
-app.post("/pay/withdraw", async (req, res) => {
-  try {
-    const { sellerUid, amount } = req.body;
-    const userSnap = await getDoc(doc(db, "users", sellerUid));
-    const balance = userSnap.data().balance || 0;
-    if (balance < amount) return res.status(400).json({ status: false, message: "Insufficient balance" });
+/* -------------------- HEALTH CHECK -------------------- */
 
-    await setDoc(doc(db, "users", sellerUid), { balance: balance - amount }, { merge: true });
-    res.json({ status: true, message: `₦${amount} withdrawn successfully` });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ status: false, message: "Withdrawal failed" });
-  }
+app.get("/", (_, res) => {
+  res.send("✅ True Ads backend running");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
+/* -------------------- START SERVER -------------------- */
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
