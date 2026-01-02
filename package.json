@@ -14,5 +14,16 @@
     "express": "^5.2.1",
     "firebase-admin": "^12.7.0",
     "node-fetch": "^3.3.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chigozie124/true-ads-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Chigozie124/true-ads-backend/issues"
+  },
+  "homepage": "https://github.com/Chigozie124/true-ads-backend#readme"
 }
