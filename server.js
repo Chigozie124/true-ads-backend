@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Health check
+// -------------------- HEALTH CHECK --------------------
 app.get("/", (req, res) => res.json({ status: "Backend running ✅" }));
 
 // -------------------- USERS --------------------
@@ -25,7 +25,8 @@ app.get("/users", async (req, res) => {
 // -------------------- CHAT --------------------
 app.post("/chat/send", async (req, res) => {
   const { chatId, senderId, message } = req.body;
-  if (!chatId || !senderId || !message) return res.status(400).json({ error: "Missing fields" });
+  if (!chatId || !senderId || !message)
+    return res.status(400).json({ error: "Missing fields" });
 
   try {
     const chatRef = db.collection("chats").doc(chatId);
@@ -55,7 +56,7 @@ app.get("/chat/:chatId", async (req, res) => {
   }
 });
 
-// -------------------- SELLER UPGRADE --------------------
+// -------------------- SELLER --------------------
 app.post("/seller/upgrade", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
@@ -66,8 +67,9 @@ app.post("/seller/upgrade", async (req, res) => {
     if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
     const data = userDoc.data();
-    if (data.isseller) return res.json({ status: "Already a seller" });
+    if (data.isseller) return res.json({ status: "Already a seller ✅" });
 
+    // Upgrade user
     await userRef.update({ isseller: true, status: "Seller" });
     res.json({ status: "User upgraded to seller ✅" });
   } catch (err) {
@@ -76,41 +78,70 @@ app.post("/seller/upgrade", async (req, res) => {
   }
 });
 
-// -------------------- PAYMENT (ADD MONEY / WITHDRAW) --------------------
-app.post("/payment", async (req, res) => {
+// -------------------- ADD MONEY --------------------
+app.post("/add-money", async (req, res) => {
   const { userId, amount, method } = req.body;
-  if (!userId || !amount || !method) return res.status(400).json({ error: "Missing fields" });
+  if (!userId || !amount || !method)
+    return res.status(400).json({ error: "Missing fields" });
 
   try {
     const userRef = db.collection("users").doc(userId);
     const userDoc = await userRef.get();
     if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
-    let balance = userDoc.data().balance || 0;
+    const currentBalance = userDoc.data().balance || 0;
+    const newBalance = currentBalance + amount;
 
-    if (method === "add") {
-      balance += amount;
-    } else if (method === "withdraw") {
-      if (amount > balance) return res.status(400).json({ error: "Insufficient balance" });
-      balance -= amount;
-    } else return res.status(400).json({ error: "Invalid method" });
+    await userRef.update({ balance: newBalance });
+    res.json({ status: "Money added ✅", newBalance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to add money" });
+  }
+});
 
-    await userRef.update({ balance });
+// -------------------- WITHDRAW --------------------
+app.post("/withdraw", async (req, res) => {
+  const { userId, amount } = req.body;
+  if (!userId || !amount) return res.status(400).json({ error: "Missing fields" });
 
-    // Record transaction
+  try {
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+    const currentBalance = userDoc.data().balance || 0;
+    if (amount > currentBalance)
+      return res.status(400).json({ error: "Insufficient balance" });
+
+    const newBalance = currentBalance - amount;
+    await userRef.update({ balance: newBalance });
+    res.json({ status: "Withdraw successful ✅", newBalance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to withdraw" });
+  }
+});
+
+// -------------------- PAYMENTS --------------------
+app.post("/payment", async (req, res) => {
+  const { userId, amount, method } = req.body;
+  if (!userId || !amount || !method)
+    return res.status(400).json({ error: "Missing fields" });
+
+  try {
     const paymentRef = db.collection("payments").doc();
     await paymentRef.set({
       userId,
       amount,
       method,
-      status: "completed",
+      status: "pending",
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-
-    res.json({ status: "Success ✅", newBalance: balance });
+    res.json({ status: "Payment recorded ✅", paymentId: paymentRef.id });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to process payment" });
+    res.status(500).json({ error: "Failed to record payment" });
   }
 });
 
