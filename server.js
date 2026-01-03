@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Health check
+// -------------------- HEALTH CHECK --------------------
 app.get("/", (req, res) => res.json({ status: "Backend running ✅" }));
 
 // -------------------- USERS --------------------
@@ -22,7 +22,7 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// -------------------- SELLER --------------------
+// -------------------- SELLER UPGRADE --------------------
 app.post("/seller/upgrade", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
@@ -33,20 +33,20 @@ app.post("/seller/upgrade", async (req, res) => {
     if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
     const data = userDoc.data();
-    if (data.isseller) return res.json({ status: "Already a seller", user: data });
+    if (data.isseller) return res.json({ status: "Already a seller ✅" });
 
     await userRef.update({ isseller: true, status: "Seller" });
-    const updatedDoc = await userRef.get();
-    res.json({ status: "User upgraded to seller ✅", user: updatedDoc.data() });
+    res.json({ status: "User upgraded to seller ✅" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to upgrade user" });
   }
 });
 
-// -------------------- ADD MONEY --------------------
+// -------------------- PAYMENTS --------------------
+// Add money
 app.post("/add-money", async (req, res) => {
-  const { userId, amount, method } = req.body;
+  const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: "Missing parameters" });
 
   try {
@@ -54,18 +54,17 @@ app.post("/add-money", async (req, res) => {
     const userDoc = await userRef.get();
     if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
-    const newBalance = (userDoc.data().balance || 0) + amount;
+    const data = userDoc.data();
+    const newBalance = (data.balance || 0) + parseFloat(amount);
     await userRef.update({ balance: newBalance });
-
-    const updatedDoc = await userRef.get();
-    res.json({ status: `₦${amount.toLocaleString()} added ✅`, user: updatedDoc.data() });
+    res.json({ status: "Money added ✅", balance: newBalance });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to add money" });
   }
 });
 
-// -------------------- WITHDRAW --------------------
+// Withdraw
 app.post("/withdraw", async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: "Missing parameters" });
@@ -75,20 +74,18 @@ app.post("/withdraw", async (req, res) => {
     const userDoc = await userRef.get();
     if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
-    const currentBalance = userDoc.data().balance || 0;
-    if (amount > currentBalance) return res.status(400).json({ error: "Insufficient balance" });
+    const data = userDoc.data();
+    if ((data.balance || 0) < amount) return res.status(400).json({ error: "Insufficient balance" });
 
-    const newBalance = currentBalance - amount;
+    const newBalance = data.balance - parseFloat(amount);
     await userRef.update({ balance: newBalance });
-
-    const updatedDoc = await userRef.get();
-    res.json({ status: `₦${amount.toLocaleString()} withdrawn ✅`, user: updatedDoc.data() });
+    res.json({ status: "Withdraw request processed ✅", balance: newBalance });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to withdraw" });
   }
 });
 
-// -------------------- START SERVER -----------------
+// -------------------- START SERVER --------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
