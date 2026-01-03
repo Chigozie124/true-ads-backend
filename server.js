@@ -1,17 +1,17 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
+import fetch from "node-fetch"; // For Paystack calls
 import { db, admin } from "./firebase.js";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// -------------------- HEALTH CHECK --------------------
-app.get("/", (req, res) => res.json({ status: "Backend ✅" }));
+// ===== HEALTH CHECK =====
+app.get("/", (req, res) => res.json({ status: "Backend running ✅" }));
 
-// -------------------- USERS --------------------
+// ===== USERS =====
 app.get("/users", async (req, res) => {
   try {
     const snapshot = await db.collection("users").get();
@@ -23,120 +23,167 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// -------------------- ADD MONEY --------------------
-app.post("/add-money", async (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount) return res.status(400).json({ error: "Missing data" });
+// ===== CHAT =====
+app.post("/chat/send", async (req, res) => {
+  const { chatId, senderId, message } = req.body;
+  if (!chatId || !senderId || !message) return res.status(400).json({ error: "Missing fields" });
 
   try {
-    const userRef = db.collection("users").doc(userId);
-    const snap = await userRef.get();
-    if (!snap.exists()) return res.status(404).json({ error: "User not found" });
-    const email = snap.data().email;
-
-    // Initialize Paystack transaction
-    const paystackSecret = process.env.PAYSTACK_SECRET;
-    const response = await fetch("https://api.paystack.co/transaction/initialize", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${paystackSecret}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        email,
-        amount: Math.floor(amount * 100), // kobo
-        metadata: { userId },
-        callback_url: `${process.env.BACKEND_URL}/payment/verify`
-      })
+    const chatRef = db.collection("chats").doc(chatId);
+    await chatRef.update({
+      messages: admin.firestore.FieldValue.arrayUnion({
+        senderId,
+        message,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      }),
     });
-
-    const data = await response.json();
-    if (!data.status) throw new Error(data.message);
-
-    res.json({ status: "Payment initiated ✅", authorization_url: data.data.authorization_url });
+    res.json({ status: "Message sent ✅" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to send message" });
   }
 });
 
-// -------------------- VERIFY PAYMENT --------------------
-app.post("/payment/verify", async (req, res) => {
-  const { reference } = req.body;
-  if (!reference) return res.status(400).json({ error: "Missing reference" });
-
+app.get("/chat/:chatId", async (req, res) => {
+  const { chatId } = req.params;
   try {
-    const paystackSecret = process.env.PAYSTACK_SECRET;
-    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${paystackSecret}` }
-    });
-    const data = await response.json();
-    if (!data.status) throw new Error(data.message);
-
-    const metadata = data.data.metadata;
-    const userId = metadata.userId;
-    const amount = data.data.amount / 100;
-
-    // Update user balance
-    const userRef = db.collection("users").doc(userId);
-    await userRef.update({
-      balance: admin.firestore.FieldValue.increment(amount)
-    });
-
-    res.json({ status: "Payment verified ✅", amount });
+    const chatDoc = await db.collection("chats").doc(chatId).get();
+    if (!chatDoc.exists) return res.status(404).json({ error: "Chat not found" });
+    res.json(chatDoc.data());
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to fetch chat" });
   }
 });
 
-// -------------------- WITHDRAW --------------------
-app.post("/withdraw", async (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount) return res.status(400).json({ error: "Missing data" });
-
-  try {
-    const userRef = db.collection("users").doc(userId);
-    const snap = await userRef.get();
-    if (!snap.exists()) return res.status(404).json({ error: "User not found" });
-
-    const userData = snap.data();
-    if (userData.balance < amount) return res.status(400).json({ error: "Insufficient balance" });
-
-    // Simulate withdrawal (Paystack transfer can be added here)
-    await userRef.update({
-      balance: admin.firestore.FieldValue.increment(-amount)
-    });
-
-    res.json({ status: `₦${amount} withdrawal successful ✅` });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// -------------------- UPGRADE TO SELLER --------------------
+// ===== UPGRADE TO SELLER =====
 app.post("/seller/upgrade", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
     const userRef = db.collection("users").doc(userId);
-    const snap = await userRef.get();
-    if (!snap.exists()) return res.status(404).json({ error: "User not found" });
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
 
-    const data = snap.data();
+    const data = userDoc.data();
     if (data.isseller) return res.json({ status: "Already a seller ✅" });
 
-    await userRef.update({ isseller: true, status: "Seller" });
+    // Optional: Check if user paid before allowing upgrade
+    if ((data.balance || 0) < 5000) {
+      return res.status(400).json({ error: "Insufficient balance to upgrade. Pay ₦5000" });
+    }
+
+    await userRef.update({
+      isseller: true,
+      status: "Seller",
+      balance: admin.firestore.FieldValue.increment(-5000) // Deduct upgrade fee
+    });
     res.json({ status: "User upgraded to seller ✅" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to upgrade user" });
   }
 });
 
-// -------------------- START SERVER --------------------
+// ===== PAYMENTS (ADD MONEY) =====
+app.post("/payment", async (req, res) => {
+  const { userId, amount, method } = req.body;
+  if (!userId || !amount || !method) return res.status(400).json({ error: "Missing fields" });
+
+  try {
+    // Initialize Paystack payment
+    const paystackRes = await fetch("https://api.paystack.co/transaction/initialize", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: `${userId}@trueads.app`, // Use dummy email if needed
+        amount: amount * 100, // Paystack uses kobo
+        currency: "NGN",
+        callback_url: "" // optional callback
+      })
+    });
+
+    const paystackData = await paystackRes.json();
+    if (!paystackData.status) throw new Error(paystackData.message || "Paystack failed");
+
+    // Record payment as pending
+    const paymentRef = db.collection("payments").doc();
+    await paymentRef.set({
+      userId,
+      amount,
+      method,
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ status: "success", paymentUrl: paystackData.data.authorization_url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || "Payment failed" });
+  }
+});
+
+// ===== WITHDRAW =====
+app.post("/withdraw", async (req, res) => {
+  const { userId, amount, method } = req.body;
+  if (!userId || !amount || !method) return res.status(400).json({ error: "Missing fields" });
+
+  try {
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+    const balance = userDoc.data().balance || 0;
+    if (amount > balance) return res.status(400).json({ error: "Insufficient balance" });
+
+    await userRef.update({
+      balance: admin.firestore.FieldValue.increment(-amount)
+    });
+
+    // Optional: record withdrawal request
+    const withdrawRef = db.collection("withdrawals").doc();
+    await withdrawRef.set({
+      userId,
+      amount,
+      method,
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ status: "Withdraw request sent ✅" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Withdraw failed" });
+  }
+});
+
+// ===== CLEANUP SELLERS =====
+app.post("/admin/cleanup-sellers", async (req, res) => {
+  try {
+    const snapshot = await db.collection("users").get();
+    const results = [];
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      const updates = {};
+      if ("seller" in data) updates.seller = admin.firestore.FieldValue.delete();
+      if ("isseller" in data && data.isseller === false) updates.isseller = admin.firestore.FieldValue.delete();
+      if (Object.keys(updates).length) {
+        await doc.ref.update(updates);
+        results.push({ userId: doc.id, removed: Object.keys(updates) });
+      }
+    }
+    res.json({ status: "Cleanup done ✅", details: results });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed cleanup" });
+  }
+});
+
+// ===== START SERVER =====
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
