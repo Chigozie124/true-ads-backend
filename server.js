@@ -55,7 +55,7 @@ app.get("/chat/:chatId", async (req, res) => {
   }
 });
 
-// -------------------- SELLER --------------------
+// -------------------- SELLER UPGRADE --------------------
 app.post("/seller/upgrade", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
@@ -68,7 +68,7 @@ app.post("/seller/upgrade", async (req, res) => {
     const data = userDoc.data();
     if (data.isseller) return res.json({ status: "Already a seller" });
 
-    await userRef.update({ isseller: true });
+    await userRef.update({ isseller: true, status: "Seller" });
     res.json({ status: "User upgraded to seller ✅" });
   } catch (err) {
     console.error(err);
@@ -76,24 +76,41 @@ app.post("/seller/upgrade", async (req, res) => {
   }
 });
 
-// -------------------- PAYMENTS --------------------
+// -------------------- PAYMENT (ADD MONEY / WITHDRAW) --------------------
 app.post("/payment", async (req, res) => {
   const { userId, amount, method } = req.body;
   if (!userId || !amount || !method) return res.status(400).json({ error: "Missing fields" });
 
   try {
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+    let balance = userDoc.data().balance || 0;
+
+    if (method === "add") {
+      balance += amount;
+    } else if (method === "withdraw") {
+      if (amount > balance) return res.status(400).json({ error: "Insufficient balance" });
+      balance -= amount;
+    } else return res.status(400).json({ error: "Invalid method" });
+
+    await userRef.update({ balance });
+
+    // Record transaction
     const paymentRef = db.collection("payments").doc();
     await paymentRef.set({
       userId,
       amount,
       method,
-      status: "pending",
+      status: "completed",
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-    res.json({ status: "Payment recorded ✅", paymentId: paymentRef.id });
+
+    res.json({ status: "Success ✅", newBalance: balance });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to record payment" });
+    res.status(500).json({ error: "Failed to process payment" });
   }
 });
 
@@ -106,7 +123,7 @@ app.post("/admin/cleanup-sellers", async (req, res) => {
       const data = doc.data();
       const updates = {};
       if ("seller" in data) updates.seller = admin.firestore.FieldValue.delete();
-      if ("isseller" in data && data.isseller === false) updates.isseller = false;
+      if ("isseller" in data && data.isseller === false) updates.isseller = admin.firestore.FieldValue.delete();
       if (Object.keys(updates).length) {
         await doc.ref.update(updates);
         results.push({ userId: doc.id, removed: Object.keys(updates) });
