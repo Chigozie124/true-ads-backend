@@ -1,15 +1,15 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import fetch from "node-fetch";
 import { db, admin } from "./firebase.js";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
 // -------------------- HEALTH CHECK --------------------
-app.get("/", (req, res) => res.json({ status: "Backend running ✅" }));
+app.get("/", (req, res) => res.json({ status: "Backend ✅" }));
 
 // -------------------- USERS --------------------
 app.get("/users", async (req, res) => {
@@ -23,29 +23,7 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// -------------------- SELLER UPGRADE --------------------
-app.post("/seller/upgrade", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "Missing userId" });
-
-  try {
-    const userRef = db.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-
-    const data = userDoc.data();
-    if (data.isseller) return res.json({ status: "Already a seller ✅" });
-
-    await userRef.update({ isseller: true, status: "Seller" });
-    res.json({ status: "User upgraded to seller ✅" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to upgrade user" });
-  }
-});
-
-// -------------------- PAYMENTS --------------------
-// Record payment request
+// -------------------- ADD MONEY --------------------
 app.post("/add-money", async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: "Missing data" });
@@ -54,26 +32,66 @@ app.post("/add-money", async (req, res) => {
     const userRef = db.collection("users").doc(userId);
     const snap = await userRef.get();
     if (!snap.exists()) return res.status(404).json({ error: "User not found" });
+    const email = snap.data().email;
 
-    // Here you would initialize Paystack payment and return authorization URL
-    // For now we just simulate pending payment
-    const paymentRef = db.collection("payments").doc();
-    await paymentRef.set({
-      userId,
-      amount,
-      method: "Paystack",
-      status: "pending",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    // Initialize Paystack transaction
+    const paystackSecret = process.env.PAYSTACK_SECRET;
+    const response = await fetch("https://api.paystack.co/transaction/initialize", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${paystackSecret}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email,
+        amount: Math.floor(amount * 100), // kobo
+        metadata: { userId },
+        callback_url: `${process.env.BACKEND_URL}/payment/verify`
+      })
     });
 
-    res.json({ status: "Add money request recorded ✅", paymentId: paymentRef.id });
+    const data = await response.json();
+    if (!data.status) throw new Error(data.message);
+
+    res.json({ status: "Payment initiated ✅", authorization_url: data.data.authorization_url });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to add money" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Withdraw money
+// -------------------- VERIFY PAYMENT --------------------
+app.post("/payment/verify", async (req, res) => {
+  const { reference } = req.body;
+  if (!reference) return res.status(400).json({ error: "Missing reference" });
+
+  try {
+    const paystackSecret = process.env.PAYSTACK_SECRET;
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${paystackSecret}` }
+    });
+    const data = await response.json();
+    if (!data.status) throw new Error(data.message);
+
+    const metadata = data.data.metadata;
+    const userId = metadata.userId;
+    const amount = data.data.amount / 100;
+
+    // Update user balance
+    const userRef = db.collection("users").doc(userId);
+    await userRef.update({
+      balance: admin.firestore.FieldValue.increment(amount)
+    });
+
+    res.json({ status: "Payment verified ✅", amount });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------- WITHDRAW --------------------
 app.post("/withdraw", async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: "Missing data" });
@@ -83,45 +101,39 @@ app.post("/withdraw", async (req, res) => {
     const snap = await userRef.get();
     if (!snap.exists()) return res.status(404).json({ error: "User not found" });
 
-    const balance = snap.data().balance || 0;
-    if (balance < amount) return res.status(400).json({ error: "Insufficient balance" });
+    const userData = snap.data();
+    if (userData.balance < amount) return res.status(400).json({ error: "Insufficient balance" });
 
-    await userRef.update({ balance: balance - amount });
-    res.json({ status: `Withdrawal of ₦${amount} successful ✅`, newBalance: balance - amount });
+    // Simulate withdrawal (Paystack transfer can be added here)
+    await userRef.update({
+      balance: admin.firestore.FieldValue.increment(-amount)
+    });
+
+    res.json({ status: `₦${amount} withdrawal successful ✅` });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to withdraw" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// -------------------- PAYSTACK CALLBACK --------------------
-app.get("/payment/verify/:reference", async (req, res) => {
-  const { reference } = req.params;
+// -------------------- UPGRADE TO SELLER --------------------
+app.post("/seller/upgrade", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "Missing userId" });
+
   try {
-    const paystackSecret = process.env.PAYSTACK_SECRET;
-    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-      headers: { Authorization: `Bearer ${paystackSecret}` }
-    });
-    const data = await response.json();
+    const userRef = db.collection("users").doc(userId);
+    const snap = await userRef.get();
+    if (!snap.exists()) return res.status(404).json({ error: "User not found" });
 
-    if (data.status && data.data.status === "success") {
-      const userId = data.data.metadata.userId;
-      const amount = data.data.amount / 100;
-      const userRef = db.collection("users").doc(userId);
+    const data = snap.data();
+    if (data.isseller) return res.json({ status: "Already a seller ✅" });
 
-      const snap = await userRef.get();
-      if (snap.exists()) {
-        const currentBalance = snap.data().balance || 0;
-        await userRef.update({ balance: currentBalance + amount });
-      }
-
-      res.json({ status: "Payment successful ✅", amount });
-    } else {
-      res.status(400).json({ error: "Payment not successful" });
-    }
+    await userRef.update({ isseller: true, status: "Seller" });
+    res.json({ status: "User upgraded to seller ✅" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to verify payment" });
+    res.status(500).json({ error: err.message });
   }
 });
 
