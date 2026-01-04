@@ -1,253 +1,220 @@
 import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
+import admin from "firebase-admin";
 import fetch from "node-fetch";
-import { db, admin } from "./firebase.js";
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// Paystack keys from environment
-const PAYSTACK_SECRET_LIVE = process.env.PAYSTACK_SECRET_LIVE;
-const PAYSTACK_SECRET_TEST = process.env.PAYSTACK_SECRET_TEST;
-const PAYSTACK_ENV = process.env.PAYSTACK_ENV || "test"; // "live" or "test"
-const PAYSTACK_SECRET =
-  PAYSTACK_ENV === "live" ? PAYSTACK_SECRET_LIVE : PAYSTACK_SECRET_TEST;
-
-// Health check
-app.get("/", (req, res) => res.json({ status: "Backend up ✅" }));
-
-// -------------------- USERS --------------------
-app.get("/users", async (req, res) => {
-  try {
-    const snapshot = await db.collection("users").get();
-    const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.json(users);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch users" });
-  }
-});
-
-// -------------------- CHAT --------------------
-app.post("/chat/send", async (req, res) => {
-  const { chatId, senderId, message } = req.body;
-  if (!chatId || !senderId || !message)
-    return res.status(400).json({ error: "Missing parameters" });
-
-  try {
-    const chatRef = db.collection("chats").doc(chatId);
-    await chatRef.update({
-      messages: admin.firestore.FieldValue.arrayUnion({
-        senderId,
-        message,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-      })
-    });
-    res.json({ status: "Message sent ✅" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
-app.get("/chat/:chatId", async (req, res) => {
-  const { chatId } = req.params;
-  try {
-    const chatDoc = await db.collection("chats").doc(chatId).get();
-    if (!chatDoc.exists) return res.status(404).json({ error: "Chat not found" });
-    res.json(chatDoc.data());
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch chat" });
-  }
-});
-
-// -------------------- SELLER --------------------
-app.post("/seller/upgrade", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "Missing userId" });
-
-  try {
-    const userRef = db.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-
-    const data = userDoc.data();
-    if (data.isseller)
-      return res.json({ status: "Already a seller ✅" });
-
-    await userRef.update({ isseller: true, status: "Seller" });
-    res.json({ status: "User upgraded to seller ✅" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to upgrade user" });
-  }
-});
-
-// -------------------- PAYMENTS --------------------
-
-// Add Money (Payment initiation)
-app.post("/payment/add-money", async (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount)
-    return res.status(400).json({ error: "Missing parameters" });
-
-  try {
-    // Create pending payment record
-    const paymentRef = db.collection("payments").doc();
-    await paymentRef.set({
-      userId,
-      amount,
-      method: "add-money",
-      status: "pending",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    res.json({
-      status: "Payment recorded ✅",
-      paymentId: paymentRef.id
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to create payment" });
-  }
-});
-
-// Withdraw (Queued processing)
-app.post("/payment/withdraw", async (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount)
-    return res.status(400).json({ error: "Missing parameters" });
-
-  try {
-    const userRef = db.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-
-    const userData = userDoc.data();
-    if (!userData.isKycVerified)
-      return res.status(403).json({ error: "KYC verification required" });
-
-    if (userData.balance < amount)
-      return res.status(400).json({ error: "Insufficient balance" });
-
-    // Create a queued withdrawal
-    const withdrawRef = db.collection("withdrawals").doc();
-    await withdrawRef.set({
-      userId,
-      amount,
-      status: "pending",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    res.json({ status: "Withdrawal queued ✅", withdrawId: withdrawRef.id });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to queue withdrawal" });
-  }
-});
-
-// -------------------- PAYSTACK WEBHOOK --------------------
-app.post("/paystack/webhook", async (req, res) => {
-  try {
-    const event = req.body;
-
-    // Only process successful payments
-    if (event.event === "charge.success") {
-      const paymentRef = db.collection("payments").doc(event.data.reference);
-      const paymentDoc = await paymentRef.get();
-      if (paymentDoc.exists && paymentDoc.data().status === "pending") {
-        const { userId, amount } = paymentDoc.data();
-        const userRef = db.collection("users").doc(userId);
-        await userRef.update({
-          balance: admin.firestore.FieldValue.increment(amount)
-        });
-        await paymentRef.update({ status: "completed" });
-      }
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error(err);
-    res.sendStatus(500);
-  }
-});
-
-// -------------------- BACKGROUND QUEUE PROCESS --------------------
-async function processWithdrawals() {
-  const pending = await db.collection("withdrawals")
-    .where("status", "==", "pending")
-    .get();
-
-  for (const doc of pending.docs) {
-    const w = doc.data();
-    const userRef = db.collection("users").doc(w.userId);
-    const userDoc = await userRef.get();
-    const userData = userDoc.data();
-
-    if (!userData || userData.balance < w.amount) {
-      await doc.ref.update({ status: "failed", reason: "Insufficient balance" });
-      continue;
-    }
-
-    // Attempt Paystack transfer
-    try {
-      const response = await fetch("https://api.paystack.co/transfer", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          source: "balance",
-          reason: "User withdrawal",
-          amount: w.amount * 100, // kobo
-          recipient: userData.paystackRecipientCode // must be set during KYC
-        })
-      });
-
-      const result = await response.json();
-
-      if (result.status) {
-        await userRef.update({ balance: userData.balance - w.amount });
-        await doc.ref.update({ status: "completed", transferRef: result.data.reference });
-      } else {
-        await doc.ref.update({ status: "failed", reason: result.message });
-      }
-    } catch (err) {
-      console.error("Withdrawal error:", err);
-      await doc.ref.update({ status: "failed", reason: "Transfer error" });
-    }
-  }
+/* ================= FIREBASE ================= */
+if (!process.env.FIREBASE_ADMIN_JSON) {
+  throw new Error("FIREBASE_ADMIN_JSON env variable is not set");
 }
 
-// Run every 20 seconds
-setInterval(processWithdrawals, 20000);
-
-// -------------------- ADMIN CLEANUP --------------------
-app.post("/admin/cleanup-sellers", async (req, res) => {
-  try {
-    const snapshot = await db.collection("users").get();
-    const results = [];
-    for (const doc of snapshot.docs) {
-      const data = doc.data();
-      const updates = {};
-      if ("seller" in data) updates.seller = admin.firestore.FieldValue.delete();
-      if ("isseller" in data && data.isseller === false) updates.isseller = admin.firestore.FieldValue.delete();
-      if (Object.keys(updates).length) {
-        await doc.ref.update(updates);
-        results.push({ userId: doc.id, removed: Object.keys(updates) });
-      }
-    }
-    res.json({ status: "Cleanup done ✅", details: results });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed cleanup" });
-  }
+admin.initializeApp({
+  credential: admin.credential.cert(
+    JSON.parse(process.env.FIREBASE_ADMIN_JSON)
+  ),
 });
 
-// -------------------- START SERVER -----------------
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const db = admin.firestore();
+const now = () => admin.firestore.FieldValue.serverTimestamp();
+
+/* ================= PAYSTACK ================= */
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+
+/* ======================================================
+   PRODUCTS
+====================================================== */
+app.post("/products/create", async (req, res) => {
+  const { sellerId, title, price, imageUrl } = req.body;
+
+  await db.collection("products").add({
+    sellerId,
+    title,
+    price,
+    imageUrl: imageUrl || null,
+    status: "active",
+    createdAt: now(),
+  });
+
+  res.json({ success: true });
+});
+
+app.get("/products", async (_, res) => {
+  const snap = await db.collection("products").where("status", "==", "active").get();
+  res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+});
+
+/* ======================================================
+   PAYMENTS (ESCROW)
+====================================================== */
+app.post("/payment", async (req, res) => {
+  const { buyerId, productId } = req.body;
+  const productSnap = await db.collection("products").doc(productId).get();
+
+  if (!productSnap.exists) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+
+  const product = productSnap.data();
+
+  const orderRef = await db.collection("orders").add({
+    buyerId,
+    sellerId: product.sellerId,
+    productId,
+    amount: product.price,
+    status: "paid",
+    createdAt: now(),
+  });
+
+  res.json({ success: true, orderId: orderRef.id });
+});
+
+/* ======================================================
+   DELIVERY CONFIRMATION
+====================================================== */
+app.post("/order/confirm-delivery", async (req, res) => {
+  const { orderId } = req.body;
+  const orderRef = db.collection("orders").doc(orderId);
+  const orderSnap = await orderRef.get();
+
+  if (!orderSnap.exists) return res.status(404).json({ error: "Order not found" });
+
+  const order = orderSnap.data();
+  const walletRef = db.collection("wallets").doc(order.sellerId);
+
+  await db.runTransaction(async tx => {
+    tx.update(walletRef, {
+      pending: admin.firestore.FieldValue.increment(-order.amount),
+      available: admin.firestore.FieldValue.increment(order.amount),
+      totalEarned: admin.firestore.FieldValue.increment(order.amount),
+      updatedAt: now(),
+    });
+
+    tx.update(orderRef, { status: "completed" });
+  });
+
+  res.json({ success: true });
+});
+
+/* ======================================================
+   DISPUTES
+====================================================== */
+app.post("/dispute/open", async (req, res) => {
+  const { orderId, reason } = req.body;
+  const orderSnap = await db.collection("orders").doc(orderId).get();
+
+  if (!orderSnap.exists) return res.status(404).json({ error: "Order not found" });
+
+  const order = orderSnap.data();
+
+  await db.collection("disputes").add({
+    orderId,
+    buyerId: order.buyerId,
+    sellerId: order.sellerId,
+    reason,
+    status: "open",
+    createdAt: now(),
+  });
+
+  await db.collection("orders").doc(orderId).update({ status: "disputed" });
+
+  res.json({ success: true });
+});
+
+/* ======================================================
+   ADMIN RESOLVE DISPUTE
+====================================================== */
+app.post("/admin/dispute/resolve", async (req, res) => {
+  const { disputeId, action } = req.body;
+
+  const disputeRef = db.collection("disputes").doc(disputeId);
+  const disputeSnap = await disputeRef.get();
+  if (!disputeSnap.exists) return res.status(404).json({ error: "Dispute not found" });
+
+  const dispute = disputeSnap.data();
+  const orderRef = db.collection("orders").doc(dispute.orderId);
+  const orderSnap = await orderRef.get();
+  const order = orderSnap.data();
+
+  if (action === "refund") {
+    await orderRef.update({ status: "refunded" });
+  }
+
+  if (action === "release") {
+    const walletRef = db.collection("wallets").doc(order.sellerId);
+    await db.runTransaction(async tx => {
+      tx.update(walletRef, {
+        pending: admin.firestore.FieldValue.increment(-order.amount),
+        available: admin.firestore.FieldValue.increment(order.amount),
+      });
+      tx.update(orderRef, { status: "completed" });
+    });
+  }
+
+  await disputeRef.update({ status: "resolved", resolution: action });
+
+  res.json({ success: true });
+});
+
+/* ======================================================
+   ADS
+====================================================== */
+app.post("/ads/create", async (req, res) => {
+  const { ownerId, productId, type, budget } = req.body;
+
+  await db.collection("ads").add({
+    ownerId,
+    productId: productId || null,
+    type,
+    budget,
+    spent: 0,
+    status: "active",
+    createdAt: now(),
+  });
+
+  res.json({ success: true });
+});
+
+app.get("/ads", async (_, res) => {
+  const snap = await db.collection("ads").where("status", "==", "active").get();
+  res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+});
+
+/* ======================================================
+   WITHDRAWALS (KYC REQUIRED)
+====================================================== */
+app.post("/withdraw", async (req, res) => {
+  const { userId, amount } = req.body;
+
+  const userSnap = await db.collection("users").doc(userId).get();
+  if (!userSnap.data().kycVerified) {
+    return res.status(403).json({ error: "KYC not verified" });
+  }
+
+  const walletRef = db.collection("wallets").doc(userId);
+  const walletSnap = await walletRef.get();
+
+  if (walletSnap.data().available < amount) {
+    return res.status(400).json({ error: "Insufficient balance" });
+  }
+
+  await walletRef.update({
+    available: admin.firestore.FieldValue.increment(-amount),
+  });
+
+  await db.collection("withdrawals").add({
+    userId,
+    amount,
+    status: "pending",
+    createdAt: now(),
+  });
+
+  res.json({ success: true });
+});
+
+/* ================= START ================= */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Backend running on", PORT));
