@@ -52,6 +52,37 @@ app.get("/user/:uid", async (req, res) => {
   }
 });
 
+/* ================= NOTIFICATIONS ================= */
+// Get notifications for a user
+app.get("/notifications/:uid", async (req, res) => {
+  const { uid } = req.params;
+
+  try {
+    const notifSnap = await db
+      .collection("notifications")
+      .doc(uid)
+      .collection("items")
+      .orderBy("createdAt", "desc")
+      .get();
+
+    if (notifSnap.empty) {
+      // return empty array, frontend will handle "No notifications yet"
+      return res.json([]);
+    }
+
+    const notifications = notifSnap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    res.json(notifications);
+  } catch (err) {
+    console.error("Failed to fetch notifications:", err);
+    res.status(500).json({ error: "Failed to fetch notifications" });
+  }
+});
+
+
 /* ================= PRODUCTS ================= */
 app.post("/products/create", async (req, res) => {
   const { sellerId, title, price, imageUrl } = req.body;
