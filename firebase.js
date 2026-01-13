@@ -1,21 +1,10 @@
 import admin from "firebase-admin";
-import fs from "fs";
-import path from "path";
 
-// Determine which file to use
-let serviceAccount;
-
-// Check if Render secret exists
-if (fs.existsSync("/etc/secrets/firebase-admin.json")) {
-  serviceAccount = JSON.parse(fs.readFileSync("/etc/secrets/firebase-admin.json", "utf8"));
-} else {
-  // Fallback to local file for Termux / development
-  const localPath = path.join(process.cwd(), "firebase-admin.json");
-  if (!fs.existsSync(localPath)) {
-    throw new Error("Firebase admin JSON not found locally. Place it as firebase-admin.json in your project root.");
-  }
-  serviceAccount = JSON.parse(fs.readFileSync(localPath, "utf8"));
+if (!process.env.FIREBASE_ADMIN_JSON) {
+  throw new Error("FIREBASE_ADMIN_JSON env variable is not set");
 }
+
+const serviceAccount = JSON.parse(process.env.FIREBASE_ADMIN_JSON);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
