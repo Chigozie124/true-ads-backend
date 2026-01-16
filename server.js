@@ -72,19 +72,18 @@ setInterval(async () => {
 const authGuard = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Missing token" });
-  try { req.uid = verifyJWT(token).uid; next(); } 
+  try { req.uid = verifyJWT(token).uid; next(); }
   catch { return res.status(401).json({ error: "Invalid/expired token" }); }
 };
 
-/* ================= USERS ================= */
-app.get("/user/:uid", authGuard, async (req, res) => {
-  const snap = await db.collection("users").doc(req.params.uid).get();
-  if (!snap.exists) return res.status(404).json({ error: "User not found" });
-  await ensureWallet(req.params.uid);
-  const wallet = await db.collection("wallets").doc(req.params.uid).get();
-  res.json({ uid: req.params.uid, ...snap.data(), wallet: wallet.data() });
-});
+/* ================= ADMIN GUARD ================= */
+const adminGuard = async (req, res, next) => {
+  const user = await db.collection("users").doc(req.uid).get();
+  if (user.data()?.role !== "admin") return res.status(403).json({ error: "Forbidden" });
+  next();
+};
 
+/* ================= USERS ================= */
 app.post("/signup", async (req, res) => {
   const { uid, email, name } = req.body;
   const userRef = db.collection("users").doc(uid);
@@ -100,6 +99,33 @@ app.post("/login", async (req, res) => {
   if (!snap.exists) return res.status(404).json({ error: "User not found" });
   const token = signJWT(uid);
   res.json({ token, uid });
+});
+
+app.get("/user/:uid", authGuard, async (req, res) => {
+  const snap = await db.collection("users").doc(req.params.uid).get();
+  if (!snap.exists) return res.status(404).json({ error: "User not found" });
+  await ensureWallet(req.params.uid);
+  const wallet = await db.collection("wallets").doc(req.params.uid).get();
+  res.json({ uid: req.params.uid, ...snap.data(), wallet: wallet.data() });
+});
+
+/* ================= PRODUCTS ================= */
+app.get("/products", async (req, res) => {
+  try {
+    const snap = await db.collection("products").where("available", "==", true).get();
+    const products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json(products);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load products" });
+  }
+});
+
+/* ================= NOTIFICATIONS ================= */
+app.get("/notifications/:uid", authGuard, async (req, res) => {
+  const snap = await db.collection("notifications").doc(req.params.uid).collection("items").orderBy("createdAt", "desc").limit(20).get();
+  const notifs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  res.json(notifs);
 });
 
 /* ================= WATCH ADS ================= */
@@ -141,7 +167,6 @@ app.post("/payments/init", authGuard, async (req, res) => {
   const { productId } = req.body;
   const product = await db.collection("products").doc(productId).get();
   if (!product.exists) return res.status(404).json({ error: "Product missing" });
-
   const buyer = await db.collection("users").doc(req.uid).get();
   if (buyer.data()?.banned) return res.status(403).json({ error: "Banned" });
 
@@ -164,6 +189,7 @@ app.post("/payments/init", authGuard, async (req, res) => {
   res.json(pay.data.data);
 });
 
+/* ================= PAYSTACK WEBHOOK ================= */
 app.post("/paystack/webhook", async (req, res) => {
   const hash = crypto.createHmac("sha512", PAYSTACK_WEBHOOK_SECRET).update(req.rawBody).digest("hex");
   if (hash !== req.headers["x-paystack-signature"]) return res.sendStatus(401);
@@ -173,15 +199,17 @@ app.post("/paystack/webhook", async (req, res) => {
     const ref = evt.data.reference;
     const pay = await db.collection("payments").doc(ref).get();
     if (!pay.exists) return res.sendStatus(200);
+
     await ensureWallet(pay.data().sellerId);
-    await db.runTransaction(tx => {
+
+    await db.runTransaction(async (tx) => {
       tx.update(pay.ref, { status: "paid" });
       tx.update(db.collection("wallets").doc(pay.data().sellerId), { pending: admin.firestore.FieldValue.increment(pay.data().amount), updatedAt: now() });
       tx.set(db.collection("orders").doc(ref), { ...pay.data(), status: "paid", createdAt: now() });
-      // Remove product from home automatically
-      tx.update(db.collection("products").doc(pay.data().productId), { available: false });
+      tx.update(db.collection("products").doc(pay.data().productId), { available: false }); // remove sold product
     });
   }
+
   res.sendStatus(200);
 });
 
@@ -205,12 +233,6 @@ app.post("/dispute", authGuard, async (req, res) => {
 });
 
 /* ================= ADMIN ================= */
-const adminGuard = async (req, res, next) => {
-  const user = await db.collection("users").doc(req.uid).get();
-  if (user.data()?.role !== "admin") return res.status(403).json({ error: "Forbidden" });
-  next();
-};
-
 app.get("/admin/users", authGuard, adminGuard, async (req, res) => {
   const users = await db.collection("users").get();
   const walletSnap = await db.collection("wallets").get();
@@ -242,6 +264,6 @@ app.get("/admin/kyc", authGuard, adminGuard, async (req, res) => {
 /* ================= HEALTH ================= */
 app.get("/health", (_, res) => res.json({ status: "OK", paystack: !!PAYSTACK_SECRET }));
 
-/* ================= START ================= */
+/* ================= START SERVER ================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 True-Ads Backend running on ${PORT}`));
