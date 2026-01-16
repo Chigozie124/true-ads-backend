@@ -4,245 +4,244 @@ import cors from "cors";
 import admin from "firebase-admin";
 import crypto from "crypto";
 import axios from "axios";
+import jwt from "jsonwebtoken";
 
 /* ================= APP ================= */
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL }));
-app.use(express.json({
-  verify: (req, _, buf) => { req.rawBody = buf; }
-}));
+app.use(cors());
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 /* ================= FIREBASE ================= */
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_ADMIN_B64, "base64").toString("utf8")
 );
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 const now = () => admin.firestore.FieldValue.serverTimestamp();
 
-/* ================= AUTH ================= */
-const auth = async (req, res, next) => {
-  try {
-    const token = req.headers.authorization?.split("Bearer ")[1];
-    if (!token) return res.sendStatus(401);
+/* ================= PAYSTACK ================= */
+const PAYSTACK_MODE = process.env.PAYSTACK_MODE || "test";
+const PAYSTACK_SECRET = PAYSTACK_MODE === "live" ? process.env.PAYSTACK_SECRET_LIVE_KEY : process.env.PAYSTACK_SECRET_TEST_KEY;
+const PAYSTACK_WEBHOOK_SECRET = process.env.PAYSTACK_WEBHOOK_SECRET;
+const FRONTEND_URL = process.env.FRONTEND_URL;
 
-    req.user = await admin.auth().verifyIdToken(token);
+/* ================= JWT ================= */
+const JWT_SECRET = process.env.JWT_SECRET || "supersecretjwtkey";
+const JWT_EXPIRES_IN = "7d";
 
-    const userSnap = await db.collection("users").doc(req.user.uid).get();
-    if (!userSnap.exists) return res.sendStatus(401);
-    if (userSnap.data().banned) return res.status(403).json({ error: "Banned" });
-
-    req.userDoc = userSnap.data();
-    next();
-  } catch {
-    res.sendStatus(401);
-  }
-};
-
-const adminOnly = (req, res, next) => {
-  if (req.user.uid !== process.env.ADMIN_UID) return res.sendStatus(403);
-  next();
-};
+const signJWT = (uid) => jwt.sign({ uid }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+const verifyJWT = (token) => jwt.verify(token, JWT_SECRET);
 
 /* ================= HELPERS ================= */
-const ensureWallet = async uid => {
+const ensureWallet = async (uid) => {
   const ref = db.collection("wallets").doc(uid);
   if (!(await ref.get()).exists) {
-    await ref.set({
-      available: 0,
-      pending: 0,
-      frozen: 0,
-      totalEarned: 0,
-      updatedAt: now()
-    });
+    await ref.set({ available: 0, pending: 0, totalEarned: 0, updatedAt: now() });
   }
+};
+
+const notify = async (uid, title, message) => {
+  await db.collection("notifications").doc(uid).collection("items").add({
+    title, message, read: false, createdAt: now()
+  });
 };
 
 /* ================= WALLET AUTO RELEASE ================= */
+const RELEASE_HOURS = 24;
 setInterval(async () => {
   const snap = await db.collection("wallets").get();
-  const nowMs = Date.now();
-
-  for (const d of snap.docs) {
-    const w = d.data();
+  const current = Date.now();
+  for (const doc of snap.docs) {
+    const w = doc.data();
     if (w.pending > 0 && w.updatedAt?.toMillis) {
-      const hrs = (nowMs - w.updatedAt.toMillis()) / 36e5;
-      if (hrs >= 24) {
-        await d.ref.update({
+      const hrs = (current - w.updatedAt.toMillis()) / 36e5;
+      if (hrs >= RELEASE_HOURS) {
+        await doc.ref.update({
           available: admin.firestore.FieldValue.increment(w.pending),
           pending: 0,
           updatedAt: now()
         });
+        notify(doc.id, "Wallet Update", `${w.pending} has been released to your available balance.`);
       }
     }
   }
-}, 60 * 60 * 1000);
+}, 1000 * 60 * 60);
 
-/* ================= USER UPGRADES ================= */
-app.post("/user/upgrade/seller", auth, async (req, res) => {
-  await db.collection("users").doc(req.user.uid)
-    .update({ isSeller: true });
-  res.json({ success: true });
+/* ================= AUTH GUARD ================= */
+const authGuard = async (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Missing token" });
+  try { req.uid = verifyJWT(token).uid; next(); } 
+  catch { return res.status(401).json({ error: "Invalid/expired token" }); }
+};
+
+/* ================= USERS ================= */
+app.get("/user/:uid", authGuard, async (req, res) => {
+  const snap = await db.collection("users").doc(req.params.uid).get();
+  if (!snap.exists) return res.status(404).json({ error: "User not found" });
+  await ensureWallet(req.params.uid);
+  const wallet = await db.collection("wallets").doc(req.params.uid).get();
+  res.json({ uid: req.params.uid, ...snap.data(), wallet: wallet.data() });
 });
 
-app.post("/user/upgrade/premium", auth, async (req, res) => {
-  await db.collection("users").doc(req.user.uid)
-    .update({ isPremium: true });
-  res.json({ success: true });
+app.post("/signup", async (req, res) => {
+  const { uid, email, name } = req.body;
+  const userRef = db.collection("users").doc(uid);
+  await userRef.set({ email, name, banned: false, role: "user", isSeller: false });
+  await ensureWallet(uid);
+  const token = signJWT(uid);
+  res.json({ token, uid });
 });
 
-/* ================= ADS ================= */
-app.post("/ads/watch", auth, async (req, res) => {
-  const ref = db.collection("adLimits").doc(req.user.uid);
+app.post("/login", async (req, res) => {
+  const { uid } = req.body;
+  const snap = await db.collection("users").doc(uid).get();
+  if (!snap.exists) return res.status(404).json({ error: "User not found" });
+  const token = signJWT(uid);
+  res.json({ token, uid });
+});
+
+/* ================= WATCH ADS ================= */
+app.post("/ads/watch", authGuard, async (req, res) => {
+  const uid = req.uid;
+  const ref = db.collection("adRewards").doc(uid);
   const snap = await ref.get();
   const today = new Date().toDateString();
+  if (snap.exists && snap.data().lastDay === today) return res.status(429).json({ error: "Daily limit reached" });
 
-  if (snap.exists && snap.data().day === today)
-    return res.status(429).json({ error: "Daily limit reached" });
-
-  await ensureWallet(req.user.uid);
-
-  await db.collection("wallets").doc(req.user.uid).update({
-    available: admin.firestore.FieldValue.increment(50),
-    totalEarned: admin.firestore.FieldValue.increment(50)
-  });
-
-  await ref.set({ day: today });
+  await ensureWallet(uid);
+  await db.collection("wallets").doc(uid).update({ available: admin.firestore.FieldValue.increment(50) });
+  await ref.set({ lastDay: today });
+  notify(uid, "Ad Watched", "You earned 50 from watching ads!");
   res.json({ success: true, reward: 50 });
 });
 
-/* ================= PAYMENTS INIT ================= */
-app.post("/payments/init", auth, async (req, res) => {
+/* ================= SELLER UPGRADE ================= */
+app.post("/user/upgrade", authGuard, async (req, res) => {
+  await db.collection("users").doc(req.uid).update({ isSeller: true, upgraded: true, verified: false });
+  res.json({ success: true });
+});
+
+/* ================= REFERRALS ================= */
+app.post("/referral", authGuard, async (req, res) => {
+  const { referredBy } = req.body;
+  if (req.uid === referredBy) return res.status(400).json({ error: "Invalid referral" });
+  const ref = db.collection("users").doc(req.uid);
+  if ((await ref.get()).data()?.referredBy) return res.json({ ignored: true });
+  await ref.update({ referredBy });
+  await ensureWallet(referredBy);
+  await db.collection("wallets").doc(referredBy).update({ available: admin.firestore.FieldValue.increment(200) });
+  notify(referredBy, "Referral Bonus", "You earned 200 for referring a friend!");
+  res.json({ success: true });
+});
+
+/* ================= PAYMENTS ================= */
+app.post("/payments/init", authGuard, async (req, res) => {
   const { productId } = req.body;
+  const product = await db.collection("products").doc(productId).get();
+  if (!product.exists) return res.status(404).json({ error: "Product missing" });
 
-  const productSnap = await db.collection("products").doc(productId).get();
-  if (!productSnap.exists) return res.sendStatus(404);
+  const buyer = await db.collection("users").doc(req.uid).get();
+  if (buyer.data()?.banned) return res.status(403).json({ error: "Banned" });
 
-  const ref = `TRUADS_${Date.now()}`;
-
-  await db.collection("payments").doc(ref).set({
-    buyerId: req.user.uid,
-    sellerId: productSnap.data().sellerId,
+  const reference = `TRUADS_${Date.now()}`;
+  await db.collection("payments").doc(reference).set({
+    buyerId: req.uid,
+    sellerId: product.data().sellerId,
     productId,
-    amount: productSnap.data().price,
+    amount: product.data().price,
     status: "pending",
     createdAt: now()
   });
 
   const pay = await axios.post(
     "https://api.paystack.co/transaction/initialize",
-    {
-      email: req.user.email,
-      amount: productSnap.data().price * 100,
-      reference: ref,
-      callback_url: `${process.env.FRONTEND_URL}/payment-success.html`
-    },
-    { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_TEST_KEY}` } }
+    { email: buyer.data().email, amount: product.data().price * 100, reference, callback_url: `${FRONTEND_URL}/payment-success.html`, currency: "NGN" },
+    { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
   );
 
   res.json(pay.data.data);
 });
 
-/* ================= PAYSTACK WEBHOOK ================= */
 app.post("/paystack/webhook", async (req, res) => {
-  const hash = crypto.createHmac("sha512", process.env.PAYSTACK_WEBHOOK_SECRET)
-    .update(req.rawBody).digest("hex");
-
+  const hash = crypto.createHmac("sha512", PAYSTACK_WEBHOOK_SECRET).update(req.rawBody).digest("hex");
   if (hash !== req.headers["x-paystack-signature"]) return res.sendStatus(401);
 
-  if (req.body.event === "charge.success") {
-    const ref = req.body.data.reference;
-    const paySnap = await db.collection("payments").doc(ref).get();
-    if (!paySnap.exists) return res.sendStatus(200);
-
-    const pay = paySnap.data();
-    await ensureWallet(pay.sellerId);
-
-    await db.runTransaction(async tx => {
-      tx.update(paySnap.ref, { status: "paid" });
-      tx.set(db.collection("orders").doc(ref), {
-        ...pay,
-        status: "paid",
-        createdAt: now()
-      });
-      tx.update(db.collection("wallets").doc(pay.sellerId), {
-        pending: admin.firestore.FieldValue.increment(pay.amount)
-      });
+  const evt = req.body;
+  if (evt.event === "charge.success") {
+    const ref = evt.data.reference;
+    const pay = await db.collection("payments").doc(ref).get();
+    if (!pay.exists) return res.sendStatus(200);
+    await ensureWallet(pay.data().sellerId);
+    await db.runTransaction(tx => {
+      tx.update(pay.ref, { status: "paid" });
+      tx.update(db.collection("wallets").doc(pay.data().sellerId), { pending: admin.firestore.FieldValue.increment(pay.data().amount), updatedAt: now() });
+      tx.set(db.collection("orders").doc(ref), { ...pay.data(), status: "paid", createdAt: now() });
+      // Remove product from home automatically
+      tx.update(db.collection("products").doc(pay.data().productId), { available: false });
     });
   }
-
   res.sendStatus(200);
 });
 
-/* ================= ORDER FLOW ================= */
-app.post("/orders/deliver", auth, async (req, res) => {
-  const orderRef = db.collection("orders").doc(req.body.orderId);
-  await orderRef.update({ status: "delivered" });
-  res.json({ success: true });
-});
+/* ================= WITHDRAWALS ================= */
+app.post("/withdraw", authGuard, async (req, res) => {
+  const { amount } = req.body;
+  const wallet = await db.collection("wallets").doc(req.uid).get();
+  if (wallet.data().available < amount) return res.status(400).json({ error: "Insufficient funds" });
 
-app.post("/orders/confirm", auth, async (req, res) => {
-  const orderRef = db.collection("orders").doc(req.body.orderId);
-  const snap = await orderRef.get();
-
-  await db.runTransaction(async tx => {
-    tx.update(orderRef, { status: "completed" });
-    tx.update(db.collection("wallets").doc(snap.data().sellerId), {
-      pending: admin.firestore.FieldValue.increment(-snap.data().amount),
-      available: admin.firestore.FieldValue.increment(snap.data().amount),
-      totalEarned: admin.firestore.FieldValue.increment(snap.data().amount)
-    });
-  });
-
+  await wallet.ref.update({ available: admin.firestore.FieldValue.increment(-amount) });
+  await db.collection("withdrawals").add({ uid: req.uid, amount, status: "pending", createdAt: now() });
+  notify(req.uid, "Withdrawal", `${amount} withdrawal requested.`);
   res.json({ success: true });
 });
 
 /* ================= DISPUTES ================= */
-app.post("/disputes/open", auth, async (req, res) => {
-  const { orderId, reason } = req.body;
-  const orderSnap = await db.collection("orders").doc(orderId).get();
-
-  await db.collection("disputes").add({
-    ...orderSnap.data(),
-    reason,
-    status: "open",
-    createdAt: now()
-  });
-
-  await db.collection("wallets").doc(orderSnap.data().sellerId).update({
-    frozen: admin.firestore.FieldValue.increment(orderSnap.data().amount),
-    pending: admin.firestore.FieldValue.increment(-orderSnap.data().amount)
-  });
-
+app.post("/dispute", authGuard, async (req, res) => {
+  const { reason, orderId } = req.body;
+  await db.collection("disputes").add({ uid: req.uid, orderId, reason, status: "pending", createdAt: now() });
   res.json({ success: true });
 });
 
 /* ================= ADMIN ================= */
-app.post("/admin/resolve-dispute", auth, adminOnly, async (req, res) => {
-  const { disputeId, winnerUid, amount } = req.body;
+const adminGuard = async (req, res, next) => {
+  const user = await db.collection("users").doc(req.uid).get();
+  if (user.data()?.role !== "admin") return res.status(403).json({ error: "Forbidden" });
+  next();
+};
 
-  await db.collection("wallets").doc(winnerUid).update({
-    available: admin.firestore.FieldValue.increment(amount),
-    frozen: admin.firestore.FieldValue.increment(-amount)
-  });
+app.get("/admin/users", authGuard, adminGuard, async (req, res) => {
+  const users = await db.collection("users").get();
+  const walletSnap = await db.collection("wallets").get();
+  const wallets = {};
+  walletSnap.docs.forEach(d => wallets[d.id] = d.data());
+  res.json(users.docs.map(u => ({ uid: u.id, ...u.data(), balance: wallets[u.id]?.available || 0 })));
+});
 
-  await db.collection("disputes").doc(disputeId)
-    .update({ status: "resolved" });
+app.get("/admin/products", authGuard, adminGuard, async (req, res) => {
+  const products = await db.collection("products").get();
+  res.json(products.docs.map(p => ({ id: p.id, ...p.data() })));
+});
 
-  res.json({ success: true });
+app.get("/admin/orders", authGuard, adminGuard, async (req, res) => {
+  const orders = await db.collection("orders").get();
+  res.json(orders.docs.map(o => ({ id: o.id, ...o.data() })));
+});
+
+app.get("/admin/disputes", authGuard, adminGuard, async (req, res) => {
+  const disputes = await db.collection("disputes").get();
+  res.json(disputes.docs.map(d => ({ id: d.id, ...d.data() })));
+});
+
+app.get("/admin/kyc", authGuard, adminGuard, async (req, res) => {
+  const users = await db.collection("users").where("isSeller", "==", true).where("verified", "==", false).get();
+  res.json(users.docs.map(u => ({ uid: u.id, ...u.data() })));
 });
 
 /* ================= HEALTH ================= */
-app.get("/health", (_, res) =>
-  res.json({ status: "OK", marketplace: "stable-v1" })
-);
+app.get("/health", (_, res) => res.json({ status: "OK", paystack: !!PAYSTACK_SECRET }));
 
 /* ================= START ================= */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`🚀 True-Ads Marketplace Backend running on ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 True-Ads Backend running on ${PORT}`));
