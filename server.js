@@ -15,7 +15,6 @@ app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_ADMIN_B64, "base64").toString("utf8")
 );
-
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 const now = () => admin.firestore.FieldValue.serverTimestamp();
@@ -47,7 +46,7 @@ const notify = async (uid, title, message) => {
   });
 };
 
-/* ================= AUTH GUARD ================= */
+/* ================= AUTH GUARDS ================= */
 const authGuard = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Missing token" });
@@ -55,10 +54,10 @@ const authGuard = async (req, res, next) => {
   catch { return res.status(401).json({ error: "Invalid/expired token" }); }
 };
 
-/* ================= ADMIN GUARD ================= */
 const adminGuard = async (req, res, next) => {
   const user = await db.collection("users").doc(req.uid).get();
-  if (user.data()?.role !== "admin") return res.status(403).json({ error: "Forbidden" });
+  if (!["admin", "subadmin"].includes(user.data()?.role)) return res.status(403).json({ error: "Forbidden" });
+  req.role = user.data().role;
   next();
 };
 
@@ -66,7 +65,7 @@ const adminGuard = async (req, res, next) => {
 app.post("/signup", async (req, res) => {
   const { uid, email, name } = req.body;
   const userRef = db.collection("users").doc(uid);
-  await userRef.set({ email, name, banned: false, role: "user", isSeller: false });
+  await userRef.set({ email, name, banned: false, role: "user", isSeller: false, verified: false });
   await ensureWallet(uid);
   const token = signJWT(uid);
   res.json({ token, uid });
@@ -103,21 +102,21 @@ app.get("/products", async (req, res) => {
 app.post("/products/add", authGuard, async (req, res) => {
   const { name, price, description, imageUrl } = req.body;
   const userSnap = await db.collection("users").doc(req.uid).get();
-  const isSeller = userSnap.data()?.isSeller;
-  if (!isSeller) return res.status(403).json({ error: "Only sellers can add products" });
+  if (!userSnap.data()?.isSeller) return res.status(403).json({ error: "Only sellers can add products" });
 
   const productRef = await db.collection("products").add({
-    name,
-    price,
-    description,
-    imageUrl,
+    name, price, description, imageUrl,
     sellerId: req.uid,
     sellerName: userSnap.data().name,
     available: true,
     createdAt: now()
   });
-
   res.json({ success: true, id: productRef.id });
+});
+
+app.post("/products/delete/:id", authGuard, adminGuard, async (req, res) => {
+  await db.collection("products").doc(req.params.id).delete();
+  res.json({ success: true });
 });
 
 /* ================= NOTIFICATIONS ================= */
@@ -128,17 +127,18 @@ app.get("/notifications/:uid", authGuard, async (req, res) => {
   res.json(notifs);
 });
 
-/* ================= WATCH ADS ================= */
+/* ================= ADS ================= */
+const FREE_AD_DURATION = 10 * 60 * 1000; // 10 minutes
+const adSessions = {}; // in-memory tracking for simplicity
+
 app.post("/ads/watch", authGuard, async (req, res) => {
   const uid = req.uid;
-  const ref = db.collection("adRewards").doc(uid);
-  const snap = await ref.get();
-  const today = new Date().toDateString();
-  if (snap.exists && snap.data().lastDay === today) return res.status(429).json({ error: "Daily limit reached" });
-
+  if (adSessions[uid] && (Date.now() - adSessions[uid] < FREE_AD_DURATION)) {
+    return res.status(429).json({ error: "Free ad active" });
+  }
+  adSessions[uid] = Date.now();
   await ensureWallet(uid);
-  await db.collection("wallets").doc(uid).update({ available: admin.firestore.FieldValue.increment(1) }); // free ad time point
-  await ref.set({ lastDay: today });
+  await db.collection("wallets").doc(uid).update({ available: admin.firestore.FieldValue.increment(1) });
   notify(uid, "Ad Watched", "You earned 1 free ad point!");
   res.json({ success: true, reward: 1 });
 });
@@ -149,11 +149,12 @@ app.post("/user/upgrade", authGuard, async (req, res) => {
   res.json({ success: true });
 });
 
-/* ================= PAYMENTS ================= */
+/* ================= PAYMENTS / ESCROW ================= */
 app.post("/payments/init", authGuard, async (req, res) => {
   const { productId } = req.body;
   const product = await db.collection("products").doc(productId).get();
   if (!product.exists) return res.status(404).json({ error: "Product missing" });
+
   const buyer = await db.collection("users").doc(req.uid).get();
   if (buyer.data()?.banned) return res.status(403).json({ error: "Banned" });
 
@@ -217,13 +218,20 @@ app.post("/dispute", authGuard, async (req, res) => {
   res.json({ success: true });
 });
 
-/* ================= ADMIN ================= */
+/* ================= RATINGS ================= */
+app.post("/ratings", authGuard, async (req, res) => {
+  const { ratedUid, rating, review } = req.body;
+  await db.collection("ratings").add({ ratedUid, reviewerUid: req.uid, rating, review, createdAt: now() });
+  res.json({ success: true });
+});
+
+/* ================= ADMIN / SUBADMIN ================= */
 app.get("/admin/users", authGuard, adminGuard, async (req, res) => {
   const users = await db.collection("users").get();
-  const walletSnap = await db.collection("wallets").get();
-  const wallets = {};
-  walletSnap.docs.forEach(d => wallets[d.id] = d.data());
-  res.json(users.docs.map(u => ({ uid: u.id, ...u.data(), balance: wallets[u.id]?.available || 0 })));
+  const wallets = await db.collection("wallets").get();
+  const walletMap = {};
+  wallets.docs.forEach(d => walletMap[d.id] = d.data());
+  res.json(users.docs.map(u => ({ uid: u.id, ...u.data(), balance: walletMap[u.id]?.available || 0 })));
 });
 
 app.get("/admin/products", authGuard, adminGuard, async (req, res) => {
@@ -241,9 +249,22 @@ app.get("/admin/disputes", authGuard, adminGuard, async (req, res) => {
   res.json(disputes.docs.map(d => ({ id: d.id, ...d.data() })));
 });
 
-app.get("/admin/kyc", authGuard, adminGuard, async (req, res) => {
-  const users = await db.collection("users").where("isSeller", "==", true).where("verified", "==", false).get();
-  res.json(users.docs.map(u => ({ uid: u.id, ...u.data() })));
+app.post("/admin/ban/:uid", authGuard, adminGuard, async (req, res) => {
+  if (req.role !== "admin") return res.status(403).json({ error: "Only main admin can ban" });
+  await db.collection("users").doc(req.params.uid).update({ banned: true });
+  res.json({ success: true });
+});
+
+app.post("/admin/unban/:uid", authGuard, adminGuard, async (req, res) => {
+  if (req.role !== "admin") return res.status(403).json({ error: "Only main admin can unban" });
+  await db.collection("users").doc(req.params.uid).update({ banned: false });
+  res.json({ success: true });
+});
+
+/* ================= CHAT METADATA ================= */
+app.get("/chats/:uid", authGuard, async (req, res) => {
+  const snap = await db.collection("chats").where("participants", "array-contains", req.uid).get();
+  res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
 });
 
 /* ================= HEALTH ================= */
