@@ -1,4 +1,5 @@
 import express from "express";
+import "./cron.escrow.js";
 import rateLimit from "./rate-limit.js";
 
 import authRoutes from "./auth.routes.js";
@@ -25,4 +26,8 @@ app.use("/analytics", analyticsRoutes);
 
 app.get("/", (_, res) => res.send("True Ads backend running"));
 
-app.listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
