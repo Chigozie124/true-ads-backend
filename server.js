@@ -1,33 +1,48 @@
+import "dotenv/config";
 import express from "express";
-import "./cron.escrow.js";
-import rateLimit from "./rate-limit.js";
+import cors from "cors";
 
-import authRoutes from "./auth.routes.js";
-import productRoutes from "./product.routes.js";
-import orderRoutes from "./order.routes.js";
-import disputeRoutes from "./dispute.routes.js";
-import walletRoutes from "./wallet.routes.js";
-import chatRoutes from "./chat.routes.js";
-import adminRoutes from "./admin.routes.js";
-import analyticsRoutes from "./analytics.routes.js";
+import { validateEnv } from "./env.js";
+validateEnv();
+
+import "./firebase.js";
+import "./cron.js";
+
+import ESCROW_RATE from "./rate.js";
+import ESCROW_ERROR from "./error.js";
+
+import ESCROW_MAIN from "./escrow.js";
+import ESCROW_DISPUTE from "./dispute.js";
+import ESCROW_WITHDRAW from "./withdraw.js";
+import ESCROW_ADMIN from "./admin.js";
+import ESCROW_WEBHOOK from "./webhook.js";
+
+import { ESCROW_VERSION } from "./version.js";
 
 const app = express();
+
+app.use(cors());
 app.use(express.json());
-app.use(rateLimit);
+app.use(ESCROW_RATE);
 
-app.use("/auth", authRoutes);
-app.use("/products", productRoutes);
-app.use("/orders", orderRoutes);
-app.use("/disputes", disputeRoutes);
-app.use("/wallet", walletRoutes);
-app.use("/chat", chatRoutes);
-app.use("/admin", adminRoutes);
-app.use("/analytics", analyticsRoutes);
+app.use("/escrow", ESCROW_MAIN);
+app.use("/escrow/dispute", ESCROW_DISPUTE);
+app.use("/escrow/withdraw", ESCROW_WITHDRAW);
+app.use("/escrow/admin", ESCROW_ADMIN);
 
-app.get("/", (_, res) => res.send("True Ads backend running"));
+app.post("/escrow/webhook/paystack", ESCROW_WEBHOOK);
+
+app.get("/", (req, res) => {
+  res.json({
+    name: "ESCROW",
+    version: ESCROW_VERSION,
+    status: "stable"
+  });
+});
+
+app.use(ESCROW_ERROR);
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log("ESCROW v" + ESCROW_VERSION + " running on " + PORT);
 });

@@ -1,6 +1,13 @@
-import { autoReleaseEscrow } from "./escrow.routes.js";
+import cron from "node-cron";
+import { db } from "./firebaseAdmin.js";
 
-setInterval(async () => {
-  console.log("Running escrow cron...");
-  await autoReleaseEscrow();
-}, 5 * 60 * 1000);
+cron.schedule("0 * * * *", async () => {
+  const snap = await db
+    .collection("escrows")
+    .where("status", "==", "funded")
+    .get();
+
+  snap.forEach(async (doc) => {
+    await doc.ref.update({ status: "released" });
+  });
+});

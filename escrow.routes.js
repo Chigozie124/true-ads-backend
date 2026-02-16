@@ -1,14 +1,23 @@
-import { db } from "./firebase.js";
+import express from "express";
+import middleware from "../middleware-auth.js";
+import { db } from "../firebaseAdmin.js";
+import { initPayment } from "../paystack.js";
 
-export async function autoReleaseEscrow() {
-  const snap = await db.collection("orders")
-    .where("status", "==", "escrow")
-    .get();
+const router = express.Router();
 
-  for (const doc of snap.docs) {
-    const o = doc.data();
-    if (Date.now() - o.createdAt > 3 * 24 * 60 * 60 * 1000) {
-      await doc.ref.update({ status: "released" });
-    }
-  }
-}
+router.post("/create", middleware, async (req, res) => {
+  const { amount } = req.body;
+  const reference = `escrow_${Date.now()}`;
+
+  await db.collection("escrows").doc(reference).set({
+    buyer: req.user.uid,
+    amount,
+    status: "pending",
+    createdAt: Date.now(),
+  });
+
+  const url = await initPayment(req.user.email, amount, reference);
+  res.json({ paymentUrl: url });
+});
+
+export default router;

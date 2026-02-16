@@ -1,15 +1,19 @@
-import fetch from "node-fetch";
+import axios from "axios";
 
-const BASE = "https://api.paystack.co";
-
-export async function paystackRequest(path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_LIVE_KEY}`,
-      "Content-Type": "application/json",
+export async function ESCROW_PAYMENT(email, amount, reference) {
+  const response = await axios.post(
+    "https://api.paystack.co/transaction/initialize",
+    {
+      email,
+      amount: amount * 100,
+      reference
     },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+    {
+      headers: {
+        Authorization: "Bearer " + process.env.PAYSTACK_SECRET
+      }
+    }
+  );
+
+  return response.data.data.authorization_url;
 }

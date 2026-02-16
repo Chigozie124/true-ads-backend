@@ -1,17 +1,14 @@
-import { db } from "../config/firebaseAdmin.js";
+import { db } from "./firebaseAdmin.js";
 
-export async function ensureUserData(uid, data) {
+export default async function ensureUser(uid, email) {
   const ref = db.collection("users").doc(uid);
   const snap = await ref.get();
 
   if (!snap.exists) {
     await ref.set({
-      role: "buyer",
-      banned: false,
+      email,
       balance: 0,
-      sellerApproved: false,
       createdAt: Date.now(),
-      ...data,
     });
   }
 }
