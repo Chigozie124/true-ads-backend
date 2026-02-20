@@ -14,6 +14,7 @@ if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
+  console.log("✅ Firebase initialized successfully");
 }
 
 export const ESCROW_DB = admin.firestore();
