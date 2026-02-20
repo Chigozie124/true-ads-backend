@@ -1,14 +1,14 @@
 import admin from "firebase-admin";
 
-const FIREBASE_B64 = process.env.FIREBASE_ADMIN_B64;
-
-if (!FIREBASE_B64) {
-  throw new Error("FIREBASE_ADMIN_B64 not found in environment");
-}
+console.log("FIREBASE_ADMIN_B64 length:", process.env.FIREBASE_ADMIN_B64?.length);
 
 if (!admin.apps.length) {
+  if (!process.env.FIREBASE_ADMIN_B64) {
+    throw new Error("FIREBASE_ADMIN_B64 env variable is missing");
+  }
+
   const serviceAccount = JSON.parse(
-    Buffer.from(FIREBASE_B64, "base64").toString("utf8")
+    Buffer.from(process.env.FIREBASE_ADMIN_B64, "base64").toString("utf-8")
   );
 
   admin.initializeApp({

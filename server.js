@@ -43,8 +43,7 @@ app.get("/", (req, res) => {
 app.use(ESCROW_ERROR);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+
+app.listen(PORT, "0.0.0.0", () => {
   console.log("ESCROW v" + ESCROW_VERSION + " running on " + PORT);
 });
-// redeploy trigger
-// redeploy trigger
