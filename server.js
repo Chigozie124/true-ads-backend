@@ -6,9 +6,7 @@ import { validateEnv } from "./env.js";
 validateEnv();
 
 import "./firebase.js";
-
-// Delay cron import 5s so server responds first
-setTimeout(() => import("./cron.js"), 5000);
+import "./cron.js";
 
 import ESCROW_RATE from "./rate.js";
 import ESCROW_ERROR from "./error.js";
@@ -31,10 +29,10 @@ app.use(ESCROW_RATE);
 console.log("Railway PORT:", process.env.PORT);
 console.log("BASE_URL:", process.env.BASE_URL);
 
-/* ===== HEALTH CHECK ===== */
+/* ===== HEALTH ROUTE ===== */
 app.get("/health", (req, res) => res.status(200).send("OK"));
 
-/* ===== ROUTES ===== */
+/* ===== MAIN ROUTES ===== */
 app.get("/", (req, res) => {
   res.json({
     name: "ESCROW",
@@ -53,11 +51,7 @@ app.post("/escrow/webhook/paystack", ESCROW_WEBHOOK);
 app.use(ESCROW_ERROR);
 
 /* ===== START SERVER ===== */
-const PORT = process.env.PORT;
-if (!PORT) {
-  console.error("❌ No PORT defined in environment. Exiting...");
-  process.exit(1);
-}
+const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ ESCROW v${ESCROW_VERSION} running on port ${PORT}`);
