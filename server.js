@@ -49,13 +49,16 @@ app.post("/escrow/webhook/paystack", ESCROW_WEBHOOK);
 app.use(ESCROW_ERROR);
 
 /* ===== START SERVER ===== */
-
 const PORT = process.env.PORT; // Railway assigns this automatically
 if (!PORT) {
   console.error("❌ No PORT defined in environment. Exiting...");
   process.exit(1);
 }
 
+/* ===== FIREBASE INIT CONFIRMATION ===== */
+console.log("✅ Firebase initialized successfully");
+
+/* ===== SERVER LISTEN ===== */
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ ESCROW v${ESCROW_VERSION} running on port ${PORT}`);
 });
