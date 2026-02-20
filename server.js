@@ -25,6 +25,10 @@ app.use(cors());
 app.use(express.json());
 app.use(ESCROW_RATE);
 
+/* ===== DEBUG ENV ===== */
+console.log("Railway PORT:", process.env.PORT);
+console.log("BASE_URL:", process.env.BASE_URL);
+
 /* ===== ROUTES ===== */
 
 app.get("/", (req, res) => {
@@ -46,12 +50,16 @@ app.use(ESCROW_ERROR);
 
 /* ===== START SERVER ===== */
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT; // Railway assigns this automatically
+if (!PORT) {
+  console.error("❌ No PORT defined in environment. Exiting...");
+  process.exit(1);
+}
 
 const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`ESCROW v${ESCROW_VERSION} running on ${PORT}`);
+  console.log(`✅ ESCROW v${ESCROW_VERSION} running on port ${PORT}`);
 });
 
-/* Railway keep alive protection */
+/* ===== RAILWAY KEEP-ALIVE ===== */
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 120000;
