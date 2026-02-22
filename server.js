@@ -2,61 +2,30 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 
-import { validateEnv } from "./env.js";
-validateEnv();
-
-import "./firebase.js";
-import "./cron.js";
-
-import ESCROW_RATE from "./rate.js";
-import ESCROW_ERROR from "./error.js";
-
-import ESCROW_MAIN from "./escrow.js";
-import ESCROW_DISPUTE from "./dispute.js";
-import ESCROW_WITHDRAW from "./withdraw.js";
-import ESCROW_ADMIN from "./admin.js";
-import ESCROW_WEBHOOK from "./webhook.js";
-
-import { ESCROW_VERSION } from "./version.js";
+import "./firebase.js"; // init firebase
+import "./cron.js";     // start cron (non blocking)
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
-app.use(ESCROW_RATE);
 
-/* ===== DEBUG ENV ===== */
-console.log("Railway PORT:", process.env.PORT);
-console.log("BASE_URL:", process.env.BASE_URL);
-
-/* ===== HEALTH ROUTE ===== */
-app.get("/health", (req, res) => res.status(200).send("OK"));
-
-/* ===== MAIN ROUTES ===== */
+/* ===== ROOT ===== */
 app.get("/", (req, res) => {
-  res.json({
+  res.status(200).json({
     name: "ESCROW",
-    version: ESCROW_VERSION,
-    status: "stable",
+    status: "running"
   });
 });
 
-app.use("/escrow", ESCROW_MAIN);
-app.use("/escrow/dispute", ESCROW_DISPUTE);
-app.use("/escrow/withdraw", ESCROW_WITHDRAW);
-app.use("/escrow/admin", ESCROW_ADMIN);
-
-app.post("/escrow/webhook/paystack", ESCROW_WEBHOOK);
-
-app.use(ESCROW_ERROR);
-
-/* ===== START SERVER ===== */
-const PORT = process.env.PORT || 3000;
-
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ ESCROW v${ESCROW_VERSION} running on port ${PORT}`);
+/* ===== HEALTH ===== */
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
 });
 
-/* ===== RAILWAY KEEP-ALIVE ===== */
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 120000;
+/* ===== PORT ===== */
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("🚀 SERVER STARTED ON PORT", PORT);
+});
