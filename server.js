@@ -53,13 +53,11 @@ app.use(ESCROW_ERROR);
 
 /* ===== START SERVER ===== */
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 ESCROW SERVER STARTED ON PORT", PORT);
 });
-
-/* ===== KEEP ALIVE ===== */
 
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 120000;
