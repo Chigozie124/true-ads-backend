@@ -1,33 +1,47 @@
 import express from "express";
-import { ESCROW_DB, ESCROW_FIELD } from "./firebase.js";
+import { ESCROW_DB, ESCROW_AUTH } from "./firebase.js";
+import verifyToken from "./middleware-auth.js";
 
 const router = express.Router();
 
-router.post("/release/:id", async (req, res) => {
-  const id = req.params.id;
+/* ===== CHECK ADMIN ROLE ===== */
+async function checkAdmin(req, res, next) {
+  const uid = req.user.uid;
+  const userRecord = await ESCROW_AUTH.getUser(uid);
+  if (!userRecord.customClaims?.admin) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  next();
+}
 
-  const escrowRef = ESCROW_DB.collection("ESCROW").doc(id);
-  const escrow = (await escrowRef.get()).data();
+/* ===== GET SITE ANALYTICS ===== */
+router.get("/analytics", verifyToken, checkAdmin, async (req, res) => {
+  try {
+    const usersSnapshot = await ESCROW_DB.collection("USERS").get();
+    const walletsSnapshot = await ESCROW_DB.collection("WALLETS").get();
+    const escrowsSnapshot = await ESCROW_DB.collection("ESCROWS").get();
 
-  await escrowRef.update({ status: "RELEASED" });
-
-  await ESCROW_DB.collection("ESCROW_USER")
-    .doc(escrow.sellerId)
-    .update({
-      balance: ESCROW_FIELD.increment(escrow.amount)
+    res.json({
+      totalUsers: usersSnapshot.size,
+      totalWalletBalance: walletsSnapshot.docs.reduce((sum, d) => sum + (d.data().balance || 0), 0),
+      totalEscrows: escrowsSnapshot.size,
     });
-
-  res.json({ success: true });
+  } catch (err) {
+    console.error("Analytics error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-router.post("/refund/:id", async (req, res) => {
-  const id = req.params.id;
-
-  await ESCROW_DB.collection("ESCROW")
-    .doc(id)
-    .update({ status: "REFUNDED" });
-
-  res.json({ success: true });
+/* ===== BAN/UNBAN USER ===== */
+router.post("/ban", verifyToken, checkAdmin, async (req, res) => {
+  try {
+    const { uid, ban } = req.body; // ban: true/false
+    await ESCROW_AUTH.setCustomUserClaims(uid, { banned: ban });
+    res.json({ message: `User ${ban ? "banned" : "unbanned"}` });
+  } catch (err) {
+    console.error("Ban user error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
