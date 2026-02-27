@@ -1,29 +1,57 @@
 import cron from "node-cron";
-import { ESCROW_DB, ESCROW_FIELD } from "./firebase.js";
+import { db, FieldValue } from "./firebase.js";
 
-/* ===== RUN CRON NON-BLOCKING ===== */
+/*
+  AUTO RELEASE ESCROW
+  Runs every hour
+  Releases escrow after 5 days if still FUNDED
+*/
+
 cron.schedule("0 * * * *", () => {
   (async () => {
     try {
-      const snapshot = await ESCROW_DB.collection("ESCROW")
+      console.log("⏳ Running escrow auto-release cron...");
+
+      const snapshot = await db
+        .collection("ESCROW")
         .where("status", "==", "FUNDED")
         .get();
 
-      snapshot.forEach(async (doc) => {
+      if (snapshot.empty) {
+        console.log("No funded escrows found.");
+        return;
+      }
+
+      const fiveDays = 5 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+
+      for (const doc of snapshot.docs) {
         const escrow = doc.data();
-        const fiveDays = 5 * 24 * 60 * 60 * 1000;
 
-        if (Date.now() - escrow.fundedAt > fiveDays) {
-          await doc.ref.update({ status: "RELEASED" });
+        if (!escrow.fundedAt) continue;
 
-          await ESCROW_DB.collection("ESCROW_USER")
+        if (now - escrow.fundedAt > fiveDays) {
+
+          // 1️⃣ Update escrow status
+          await doc.ref.update({
+            status: "RELEASED",
+            releasedAt: now
+          });
+
+          // 2️⃣ Credit seller wallet
+          await db
+            .collection("ESCROW_USER")
             .doc(escrow.sellerId)
             .update({
-              balance: ESCROW_FIELD.increment(escrow.amount)
+              balance: FieldValue.increment(escrow.amount)
             });
+
+          console.log(`✅ Escrow ${doc.id} auto-released`);
         }
-      });
-      console.log("✅ Cron job executed successfully");
+      }
+
+      console.log("✅ Cron job completed successfully");
+
     } catch (err) {
       console.error("❌ Cron job error:", err);
     }

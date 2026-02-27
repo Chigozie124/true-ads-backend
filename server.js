@@ -8,7 +8,7 @@ validateEnv();
 
 /* ===== INIT CORE ===== */
 import "./firebase.js";
-import "./cron.js"; // all cron jobs start automatically
+import "./cron.js";
 
 /* ===== MIDDLEWARE ===== */
 import ESCROW_RATE from "./rate.js";
@@ -21,7 +21,7 @@ import ESCROW_WITHDRAW from "./withdraw.js";
 import ESCROW_ADMIN from "./admin.js";
 import ESCROW_WEBHOOK from "./webhook.js";
 
-/* ===== USER / APP ROUTES ===== */
+/* ===== USER / WALLET / PRODUCT / TRANSACTION ===== */
 import USER_ROUTES from "./user.js";
 import WALLET_ROUTES from "./wallet.js";
 import PRODUCT_ROUTES from "./products.js";
@@ -36,20 +36,15 @@ const app = express();
    SECURITY
 ============================== */
 app.use(helmet());
-
 app.use(cors({
-  origin: "*", // change to frontend domain later
+  origin: "*", // change to frontend domain in production
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true
 }));
-
 app.use(express.json({
   limit: "10mb",
-  verify: (req, res, buf) => {
-    req.rawBody = buf?.toString();
-  }
+  verify: (req, res, buf) => { req.rawBody = buf?.toString(); }
 }));
-
 app.use(ESCROW_RATE);
 
 /* ==============================
@@ -62,7 +57,6 @@ console.log("BASE_URL:", process.env.BASE_URL);
    HEALTH CHECK
 ============================== */
 app.get("/health", (req, res) => res.status(200).send("OK"));
-
 app.get("/", (req, res) => {
   res.json({
     name: "ESCROW",
@@ -75,9 +69,7 @@ app.get("/", (req, res) => {
 /* ==============================
    SESSION CHECK
 ============================== */
-app.get("/session", (req, res) => {
-  res.json({ status: "active" });
-});
+app.get("/session", (req, res) => res.json({ status: "active" }));
 
 /* ==============================
    USER APP ROUTES
@@ -109,13 +101,12 @@ app.use(ESCROW_ERROR);
    START SERVER
 ============================== */
 const PORT = process.env.PORT || 3000;
-
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ ESCROW v${ESCROW_VERSION} running on port ${PORT}`);
 });
 
 /* ==============================
-   KEEP ALIVE
+   KEEP ALIVE (Railway)
 ============================== */
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 120000;

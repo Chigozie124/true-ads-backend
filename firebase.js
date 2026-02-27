@@ -1,13 +1,23 @@
 import admin from "firebase-admin";
 
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FB_PROJECT_ID,
-    clientEmail: process.env.FB_CLIENT_EMAIL,
-    privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, "\n")
-  })
-});
+if (!admin.apps.length) {
+  if (!process.env.FIREBASE_ADMIN_B64) {
+    throw new Error("FIREBASE_ADMIN_B64 env variable is missing");
+  }
 
-const db = admin.firestore();
+  const serviceAccount = JSON.parse(
+    Buffer.from(process.env.FIREBASE_ADMIN_B64, "base64").toString("utf-8")
+  );
 
-export { admin, db };
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
+
+/* ===== STANDARD EXPORTS ===== */
+
+export const db = admin.firestore();
+export const auth = admin.auth();
+export const FieldValue = admin.firestore.FieldValue;
+
+export default admin;

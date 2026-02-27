@@ -1,23 +1,68 @@
-import { admin } from "./firebase.js";
+import { auth, db } from "./firebase.js";
+
+/*
+  VERIFY TOKEN + BAN CHECK MIDDLEWARE
+  - Verifies Firebase ID token
+  - Checks if user exists
+  - Blocks banned users
+*/
 
 const verifyToken = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
+    const header = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Unauthorized" });
+    // 1️⃣ Check if token exists
+    if (!header || !header.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized: No token provided"
+      });
     }
 
-    const token = authHeader.split("Bearer ")[1];
+    // 2️⃣ Extract token
+    const token = header.split("Bearer ")[1];
 
-    const decoded = await admin.auth().verifyIdToken(token);
+    // 3️⃣ Verify Firebase token
+    const decoded = await auth.verifyIdToken(token);
 
-    req.user = decoded; // contains uid + email
+    // 4️⃣ Get user document from Firestore
+    const userRef = db.collection("users").doc(decoded.uid);
+    const userDoc = await userRef.get();
+
+    // 5️⃣ If user not found
+    if (!userDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "User record not found"
+      });
+    }
+
+    const userData = userDoc.data();
+
+    // 6️⃣ BAN CHECK
+    if (userData.banned === true) {
+      return res.status(403).json({
+        success: false,
+        error: "Account has been banned"
+      });
+    }
+
+    // 7️⃣ Attach user to request
+    req.user = {
+      uid: decoded.uid,
+      email: decoded.email,
+      role: userData.role || "user"
+    };
 
     next();
-  } catch (err) {
-    console.error("Token Error:", err);
-    res.status(401).json({ error: "Invalid token" });
+
+  } catch (error) {
+    console.error("Auth Middleware Error:", error);
+
+    return res.status(401).json({
+      success: false,
+      error: "Invalid or expired token"
+    });
   }
 };
 
