@@ -1,5 +1,6 @@
 import express from "express";
 import { db } from "./firebase.js";
+import verifyToken from "./middleware-auth.js";
 
 const router = express.Router();
 
@@ -17,21 +18,14 @@ router.get("/", async (req, res) => {
     const products = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(p => {
-        // Keep active products
         if (p.status !== "SOLD") return true;
-
-        // Keep SOLD products if soldAt < 3 days ago
-        if (p.soldAt && now - new Date(p.soldAt).getTime() <= threeDays) {
-          return true;
-        }
-
-        // Otherwise ignore (delete in background)
+        if (p.soldAt && now - new Date(p.soldAt).getTime() <= threeDays) return true;
         return false;
       });
 
     res.json(products);
 
-    // 🔹 background deletion of old SOLD products
+    // background cleanup
     snapshot.docs.forEach(async (doc) => {
       const data = doc.data();
       if (
@@ -39,11 +33,7 @@ router.get("/", async (req, res) => {
         data.soldAt &&
         now - new Date(data.soldAt).getTime() > threeDays
       ) {
-        try {
-          await db.collection("products").doc(doc.id).delete();
-        } catch (e) {
-          console.error("Failed to delete old product", doc.id, e);
-        }
+        await db.collection("products").doc(doc.id).delete();
       }
     });
 
@@ -53,12 +43,12 @@ router.get("/", async (req, res) => {
   }
 });
 
-/* ================= ADD PRODUCT ================= */
-router.post("/add", async (req, res) => {
+/* ================= ADD PRODUCT (PROTECTED) ================= */
+router.post("/add", verifyToken, async (req, res) => {
   try {
-    const { name, price, description, imageUrl, sellerUid, sellerName, category } = req.body;
+    const { name, price, description, imageUrl, category } = req.body;
 
-    if (!name || !price || !sellerUid) {
+    if (!name || !price) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
@@ -67,9 +57,9 @@ router.post("/add", async (req, res) => {
       price: Number(price),
       description: description || "",
       imageUrl: imageUrl || "",
-      sellerUid,
-      sellerName: sellerName || "",
       category: category || "",
+      sellerUid: req.user.uid, // from token
+      sellerName: req.user.email,
       status: "ACTIVE",
       createdAt: new Date().toISOString(),
       soldAt: null
@@ -77,7 +67,7 @@ router.post("/add", async (req, res) => {
 
     const docRef = await db.collection("products").add(newProduct);
 
-    res.json({ message: "Product added successfully", id: docRef.id });
+    res.json({ message: "Product added", id: docRef.id });
 
   } catch (error) {
     console.error(error);
@@ -85,24 +75,27 @@ router.post("/add", async (req, res) => {
   }
 });
 
-/* ================= MARK PRODUCT SOLD ================= */
-router.post("/:id/sold", async (req, res) => {
+/* ================= MARK SOLD ================= */
+router.post("/:id/sold", verifyToken, async (req, res) => {
   try {
     await db.collection("products").doc(req.params.id).update({
       status: "SOLD",
       soldAt: new Date().toISOString()
     });
+
     res.json({ message: "Product marked as SOLD" });
+
   } catch (error) {
     res.status(500).json({ error: "Failed to update product" });
   }
 });
 
-/* ================= DELETE PRODUCT ================= */
-router.delete("/:id/delete", async (req, res) => {
+/* ================= DELETE ================= */
+router.delete("/:id/delete", verifyToken, async (req, res) => {
   try {
     await db.collection("products").doc(req.params.id).delete();
     res.json({ message: "Product deleted" });
+
   } catch (error) {
     res.status(500).json({ error: "Failed to delete product" });
   }
