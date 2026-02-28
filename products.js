@@ -1,13 +1,13 @@
 import express from "express";
 import { db } from "./firebase.js";
-import verifyToken from "./middleware-auth.js";
 
 const router = express.Router();
 
-/* GET all products */
+/* ================= GET ALL PRODUCTS ================= */
 router.get("/", async (req, res) => {
   try {
     const snapshot = await db.collection("products").get();
+
     const products = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
@@ -20,31 +20,53 @@ router.get("/", async (req, res) => {
   }
 });
 
-/* POST add product (requires token + seller) */
-router.post("/add", verifyToken, async (req, res) => {
+/* ================= ADD PRODUCT ================= */
+router.post("/add", async (req, res) => {
   try {
-    const { name, price, description, imageUrl } = req.body;
-    const uid = req.user.uid;
-
-    // You can also fetch user role from Firestore
-    const userDoc = await db.collection("users").doc(uid).get();
-    const user = userDoc.data();
-    if (!user || !user.isSeller) return res.status(403).json({ error: "Only sellers can add products" });
-
-    const productRef = await db.collection("products").add({
+    const {
       name,
       price,
       description,
       imageUrl,
-      sellerId: uid,
-      createdAt: Date.now(),
-      status: "available"
+      sellerUid,
+      sellerName
+    } = req.body;
+
+    if (!name || !price || !sellerUid) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const newProduct = {
+      name,
+      price: Number(price),
+      description: description || "",
+      imageUrl: imageUrl || "",
+      sellerUid,
+      sellerName: sellerName || "",
+      status: "ACTIVE",
+      createdAt: new Date().toISOString()
+    };
+
+    const docRef = await db.collection("products").add(newProduct);
+
+    res.json({
+      message: "Product added successfully",
+      id: docRef.id
     });
 
-    res.json({ message: "Product added", id: productRef.id });
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Failed to add product" });
+  }
+});
+
+/* ================= DELETE PRODUCT ================= */
+router.delete("/:id/delete", async (req, res) => {
+  try {
+    await db.collection("products").doc(req.params.id).delete();
+    res.json({ message: "Product deleted" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to delete product" });
   }
 });
 
