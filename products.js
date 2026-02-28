@@ -14,28 +14,39 @@ router.get("/", async (req, res) => {
     const now = Date.now();
     const threeDays = 3 * 24 * 60 * 60 * 1000;
 
-    const products = [];
+    const products = snapshot.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(p => {
+        // Keep active products
+        if (p.status !== "SOLD") return true;
 
-    for (const doc of snapshot.docs) {
+        // Keep SOLD products if soldAt < 3 days ago
+        if (p.soldAt && now - new Date(p.soldAt).getTime() <= threeDays) {
+          return true;
+        }
+
+        // Otherwise ignore (delete in background)
+        return false;
+      });
+
+    res.json(products);
+
+    // 🔹 background deletion of old SOLD products
+    snapshot.docs.forEach(async (doc) => {
       const data = doc.data();
-
-      // Auto delete SOLD products after 3 days
       if (
         data.status === "SOLD" &&
         data.soldAt &&
         now - new Date(data.soldAt).getTime() > threeDays
       ) {
-        await db.collection("products").doc(doc.id).delete();
-        continue;
+        try {
+          await db.collection("products").doc(doc.id).delete();
+        } catch (e) {
+          console.error("Failed to delete old product", doc.id, e);
+        }
       }
+    });
 
-      products.push({
-        id: doc.id,
-        ...data
-      });
-    }
-
-    res.json(products);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch products" });
@@ -45,15 +56,7 @@ router.get("/", async (req, res) => {
 /* ================= ADD PRODUCT ================= */
 router.post("/add", async (req, res) => {
   try {
-    const {
-      name,
-      price,
-      description,
-      imageUrl,
-      sellerUid,
-      sellerName,
-      category
-    } = req.body;
+    const { name, price, description, imageUrl, sellerUid, sellerName, category } = req.body;
 
     if (!name || !price || !sellerUid) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -74,10 +77,7 @@ router.post("/add", async (req, res) => {
 
     const docRef = await db.collection("products").add(newProduct);
 
-    res.json({
-      message: "Product added successfully",
-      id: docRef.id
-    });
+    res.json({ message: "Product added successfully", id: docRef.id });
 
   } catch (error) {
     console.error(error);
@@ -92,7 +92,6 @@ router.post("/:id/sold", async (req, res) => {
       status: "SOLD",
       soldAt: new Date().toISOString()
     });
-
     res.json({ message: "Product marked as SOLD" });
   } catch (error) {
     res.status(500).json({ error: "Failed to update product" });
