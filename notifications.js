@@ -57,5 +57,25 @@ router.post("/:uid", verifyToken, async (req, res) => {
     res.status(500).json({ error: "Failed to send notification" });
   }
 });
+/* MARK AS READ */
+router.post("/:uid/:nid/read", verifyToken, async (req, res) => {
+  const { uid, nid } = req.params;
+
+  if (req.user.uid !== uid) return res.status(403).json({ error: "Forbidden" });
+
+  try {
+    await db.collection("users")
+      .doc(uid)
+      .collection("notifications")
+      .doc(nid)
+      .update({ read: true });
+
+    res.json({ message: "Notification marked as read" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to mark as read" });
+  }
+});
+
 
 export default router;
