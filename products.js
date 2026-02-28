@@ -6,12 +6,34 @@ const router = express.Router();
 /* ================= GET ALL PRODUCTS ================= */
 router.get("/", async (req, res) => {
   try {
-    const snapshot = await db.collection("products").get();
+    const snapshot = await db
+      .collection("products")
+      .orderBy("createdAt", "desc")
+      .get();
 
-    const products = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
+    const now = Date.now();
+    const threeDays = 3 * 24 * 60 * 60 * 1000;
+
+    const products = [];
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+
+      // Auto delete SOLD products after 3 days
+      if (
+        data.status === "SOLD" &&
+        data.soldAt &&
+        now - new Date(data.soldAt).getTime() > threeDays
+      ) {
+        await db.collection("products").doc(doc.id).delete();
+        continue;
+      }
+
+      products.push({
+        id: doc.id,
+        ...data
+      });
+    }
 
     res.json(products);
   } catch (error) {
@@ -29,7 +51,8 @@ router.post("/add", async (req, res) => {
       description,
       imageUrl,
       sellerUid,
-      sellerName
+      sellerName,
+      category
     } = req.body;
 
     if (!name || !price || !sellerUid) {
@@ -43,8 +66,10 @@ router.post("/add", async (req, res) => {
       imageUrl: imageUrl || "",
       sellerUid,
       sellerName: sellerName || "",
+      category: category || "",
       status: "ACTIVE",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      soldAt: null
     };
 
     const docRef = await db.collection("products").add(newProduct);
@@ -57,6 +82,20 @@ router.post("/add", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to add product" });
+  }
+});
+
+/* ================= MARK PRODUCT SOLD ================= */
+router.post("/:id/sold", async (req, res) => {
+  try {
+    await db.collection("products").doc(req.params.id).update({
+      status: "SOLD",
+      soldAt: new Date().toISOString()
+    });
+
+    res.json({ message: "Product marked as SOLD" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to update product" });
   }
 });
 
