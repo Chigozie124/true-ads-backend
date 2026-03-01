@@ -32,6 +32,9 @@ import { ESCROW_VERSION } from "./version.js";
 
 const app = express();
 
+app.set("trust proxy", 1); // 🔥 ADD THIS FOR RAILWAY
+
+
 /* ==============================
    SECURITY
 ============================== */
