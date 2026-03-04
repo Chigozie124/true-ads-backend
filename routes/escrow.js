@@ -1,8 +1,9 @@
-// routes/escrow.js
-const express = require('express');
+// routes/escrow.js - ES Module Version
+import express from 'express';
+import admin from 'firebase-admin';
+import Wallet from '../models/Wallet.js';
+
 const router = express.Router();
-const admin = require('firebase-admin');
-const Wallet = require('../models/Wallet');
 
 // Get escrow details
 router.get('/:productId', async (req, res) => {
@@ -94,5 +95,5 @@ router.post('/refund', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;
 

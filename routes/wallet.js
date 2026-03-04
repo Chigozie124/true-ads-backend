@@ -1,5 +1,5 @@
-// models/Wallet.js
-const admin = require('firebase-admin');
+// models/Wallet.js - ES Module Version
+import admin from 'firebase-admin';
 
 class Wallet {
   constructor(userId) {
@@ -178,5 +178,5 @@ class Wallet {
   }
 }
 
-module.exports = Wallet;
+export default Wallet;
 

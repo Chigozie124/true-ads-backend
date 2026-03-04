@@ -1,6 +1,15 @@
-// server.js - Add these lines
-const express = require('express');
-const cors = require('cors');
+// server.js - ES Module Version
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+
+// Load env variables
+dotenv.config();
+
+// Import routes
+import paymentRoutes from './routes/payment.js';
+import escrowRoutes from './routes/escrow.js';
+import withdrawRoutes from './routes/withdraw.js';
 
 const app = express();
 
@@ -8,24 +17,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Import routes
-const paymentRoutes = require('./routes/payment');
-const escrowRoutes = require('./routes/escrow');
-// Your existing routes...
-const withdrawRoutes = require('./routes/withdraw'); // Your existing
-
 // Use routes
 app.use('/api/payment', paymentRoutes);
 app.use('/api/escrow', escrowRoutes);
-app.use('/api/withdraw', withdrawRoutes); // Your existing
+app.use('/api/withdraw', withdrawRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+    res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
 

@@ -1,9 +1,10 @@
-// routes/payment.js
-const express = require('express');
+// routes/payment.js - ES Module Version
+import express from 'express';
+import axios from 'axios';
+import admin from 'firebase-admin';
+import Wallet from '../models/Wallet.js';
+
 const router = express.Router();
-const axios = require('axios');
-const admin = require('firebase-admin');
-const Wallet = require('../models/Wallet');
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_PUBLIC = process.env.PAYSTACK_PUBLIC_KEY;
@@ -26,7 +27,7 @@ router.post('/initialize-deposit', async (req, res) => {
       {
         email,
         amount: Math.round(amount * 100), // Convert to kobo
-        callback_url: `${process.env.FRONTEND_URL}/payment-callback.html`,
+        callback_url: `${process.env.FRONTEND_URL}/wallet.html`,
         metadata: {
           userId,
           type: 'wallet_deposit',
@@ -418,5 +419,5 @@ router.post('/verify-account', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;
 
