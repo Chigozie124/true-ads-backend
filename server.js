@@ -1,10 +1,9 @@
+import 'dotenv/config';
 // server.js - ES Module Version
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 
 // Load env variables
-dotenv.config();
 
 // Import routes
 import paymentRoutes from './routes/payment.js';
