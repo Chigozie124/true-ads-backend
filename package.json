@@ -1,6 +1,7 @@
 {
   "name": "true-ads-backend",
   "version": "1.0.0",
+  "description": "Backend for True Ads",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -13,5 +14,12 @@
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "firebase-admin": "^11.11.1"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "optionalDependencies": {
+    "@google-cloud/firestore": "^6.8.0",
+    "@google-cloud/storage": "^6.9.5"
   }
 }

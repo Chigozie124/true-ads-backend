@@ -1,23 +1,39 @@
 // routes/payment.js - ES Module Version
 import express from 'express';
 import axios from 'axios';
-import admin from 'firebase-admin';
+import { db, FieldValue } from '../firebase.js';
 import Wallet from '../models/Wallet.js';
 
 const router = express.Router();
 
+// Validate environment variables at startup
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_PUBLIC = process.env.PAYSTACK_PUBLIC_KEY;
+const FRONTEND_URL = process.env.FRONTEND_URL;
+
+if (!PAYSTACK_SECRET) {
+  throw new Error('PAYSTACK_SECRET_KEY environment variable is required');
+}
+if (!FRONTEND_URL) {
+  throw new Error('FRONTEND_URL environment variable is required');
+}
 
 // Initialize deposit (user adds money to wallet)
 router.post('/initialize-deposit', async (req, res) => {
   try {
     const { userId, email, amount } = req.body;
-    
-    if (!amount || amount < 100) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Minimum deposit is ₦100' 
+
+    if (!userId || !email || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId, email, and amount are required'
+      });
+    }
+
+    if (parseFloat(amount) < 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Minimum deposit is ₦100'
       });
     }
 
@@ -26,8 +42,8 @@ router.post('/initialize-deposit', async (req, res) => {
       'https://api.paystack.co/transaction/initialize',
       {
         email,
-        amount: Math.round(amount * 100), // Convert to kobo
-        callback_url: `${process.env.FRONTEND_URL}/wallet.html`,
+        amount: Math.round(parseFloat(amount) * 100), // Convert to kobo
+        callback_url: `${FRONTEND_URL}/wallet.html`,
         metadata: {
           userId,
           type: 'wallet_deposit',
@@ -50,14 +66,15 @@ router.post('/initialize-deposit', async (req, res) => {
 
     const { authorization_url, reference } = response.data.data;
 
-    // Store pending transaction
-    await admin.firestore().collection('pendingTransactions').doc(reference).set({
+    // Store pending transaction with idempotency key
+    await db.collection('pendingTransactions').doc(reference).set({
       userId,
       type: 'deposit',
       amount: parseFloat(amount),
       reference,
       status: 'pending',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp(),
+      idempotencyKey: `init_${reference}` // Prevent double-processing
     });
 
     res.json({
@@ -67,99 +84,140 @@ router.post('/initialize-deposit', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Deposit init error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to initialize deposit' 
+    console.error('Deposit init error:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      message: error.response?.data?.message || 'Failed to initialize deposit'
     });
   }
 });
 
-// Verify deposit and credit wallet
+// Verify deposit and credit wallet (Idempotent)
 router.post('/verify-deposit', async (req, res) => {
   try {
     const { reference } = req.body;
 
-    // Verify with Paystack
-    const response = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reference is required'
+      });
+    }
+
+    // Use transaction to prevent race conditions
+    const result = await db.runTransaction(async (transaction) => {
+      const pendingRef = db.collection('pendingTransactions').doc(reference);
+      const pendingDoc = await transaction.get(pendingRef);
+
+      if (!pendingDoc.exists) {
+        return { status: 'not_found' };
       }
-    );
 
-    const { data } = response.data;
+      const pending = pendingDoc.data();
 
-    if (data.status !== 'success') {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment not successful'
+      // Already processed - return cached result
+      if (pending.status === 'completed') {
+        const wallet = new Wallet(pending.userId);
+        const walletData = await wallet.getOrCreate();
+        return { 
+          status: 'already_completed', 
+          userId: pending.userId,
+          balance: walletData.balance 
+        };
+      }
+
+      // Verify with Paystack
+      const response = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+        }
+      );
+
+      const { data } = response.data;
+
+      if (data.status !== 'success') {
+        return { status: 'payment_failed', message: 'Payment not successful' };
+      }
+
+      // Verify amount matches (compare in kobo to avoid float issues)
+      const paidAmountKobo = data.amount;
+      const expectedAmountKobo = Math.round(pending.amount * 100);
+      
+      if (Math.abs(paidAmountKobo - expectedAmountKobo) > 1) {
+        return { status: 'amount_mismatch' };
+      }
+
+      const paidAmount = paidAmountKobo / 100;
+
+      // Credit wallet
+      const wallet = new Wallet(pending.userId);
+      const transactionRecord = await wallet.credit(paidAmount, {
+        source: 'deposit',
+        reference,
+        paystackRef: data.reference,
+        gateway: 'paystack',
+        metadata: data.metadata
       });
-    }
 
-    // Get pending transaction
-    const pendingRef = admin.firestore().collection('pendingTransactions').doc(reference);
-    const pendingDoc = await pendingRef.get();
-    
-    if (!pendingDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: 'Transaction not found'
+      // Update pending transaction atomically
+      transaction.update(pendingRef, {
+        status: 'completed',
+        processedAt: FieldValue.serverTimestamp(),
+        paystackData: data,
+        transactionId: transactionRecord.id
       });
-    }
 
-    const pending = pendingDoc.data();
-    
-    // Check if already processed
-    if (pending.status === 'completed') {
-      return res.json({
-        success: true,
-        message: 'Already processed',
-        balance: (await new Wallet(pending.userId).getOrCreate()).balance
-      });
-    }
+      // Get updated balance
+      const walletData = await wallet.getOrCreate();
 
-    // Verify amount matches
-    const paidAmount = data.amount / 100;
-    if (Math.abs(paidAmount - pending.amount) > 1) {
-      return res.status(400).json({
-        success: false,
-        message: 'Amount mismatch'
-      });
-    }
-
-    // Credit wallet
-    const wallet = new Wallet(pending.userId);
-    await wallet.credit(paidAmount, {
-      source: 'deposit',
-      reference,
-      paystackRef: data.reference,
-      gateway: 'paystack',
-      metadata: data.metadata
+      return {
+        status: 'success',
+        userId: pending.userId,
+        amount: paidAmount,
+        newBalance: walletData.balance
+      };
     });
 
-    // Update pending transaction
-    await pendingRef.update({
-      status: 'completed',
-      processedAt: admin.firestore.FieldValue.serverTimestamp(),
-      paystackData: data
-    });
-
-    // Get updated balance
-    const walletData = await wallet.getOrCreate();
-
-    res.json({
-      success: true,
-      message: 'Wallet funded successfully',
-      amount: paidAmount,
-      newBalance: walletData.balance
-    });
+    // Handle transaction results
+    switch (result.status) {
+      case 'not_found':
+        return res.status(404).json({
+          success: false,
+          message: 'Transaction not found'
+        });
+      case 'already_completed':
+        return res.json({
+          success: true,
+          message: 'Already processed',
+          balance: result.balance
+        });
+      case 'payment_failed':
+        return res.status(400).json({
+          success: false,
+          message: result.message
+        });
+      case 'amount_mismatch':
+        return res.status(400).json({
+          success: false,
+          message: 'Amount mismatch detected'
+        });
+      case 'success':
+        return res.json({
+          success: true,
+          message: 'Wallet funded successfully',
+          amount: result.amount,
+          newBalance: result.newBalance
+        });
+      default:
+        throw new Error('Unknown transaction status');
+    }
 
   } catch (error) {
     console.error('Verify deposit error:', error);
     res.status(500).json({
       success: false,
-      message: 'Verification failed'
+      message: error.message || 'Verification failed'
     });
   }
 });
@@ -169,54 +227,71 @@ router.post('/purchase', async (req, res) => {
   try {
     const { userId, productId, sellerId, amount } = req.body;
 
+    if (!userId || !productId || !sellerId || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId, productId, sellerId, and amount are required'
+      });
+    }
+
+    const parsedAmount = parseFloat(amount);
+    if (parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid amount'
+      });
+    }
+
     const wallet = new Wallet(userId);
     const walletData = await wallet.getOrCreate();
 
     // Check balance
-    if (walletData.balance < amount) {
+    if ((walletData.balance || 0) < parsedAmount) {
       return res.status(400).json({
         success: false,
         message: 'Insufficient balance',
         currentBalance: walletData.balance,
-        required: amount
+        required: parsedAmount
       });
     }
 
     // Deduct from buyer
-    await wallet.debit(amount, {
+    await wallet.debit(parsedAmount, {
       purpose: 'purchase',
       productId,
       sellerId
     });
 
     // Hold in escrow
-    await wallet.holdEscrow(amount, productId);
+    const escrowId = await wallet.holdEscrow(parsedAmount, productId);
 
     // Update product status
-    await admin.firestore().collection('products').doc(productId).update({
+    await db.collection('products').doc(productId).update({
       status: 'sold',
       soldTo: userId,
-      soldAt: admin.firestore.FieldValue.serverTimestamp(),
-      escrowAmount: amount,
-      escrowStatus: 'held'
+      soldAt: FieldValue.serverTimestamp(),
+      escrowAmount: parsedAmount,
+      escrowStatus: 'held',
+      escrowId
     });
 
     // Notify seller
-    await admin.firestore().collection('notifications').add({
+    await db.collection('notifications').add({
       userId: sellerId,
       type: 'sale',
       title: 'New Sale!',
-      message: `Your product has been purchased for ₦${amount}`,
+      message: `Your product has been purchased for ₦${parsedAmount}`,
       productId,
-      amount,
+      amount: parsedAmount,
       read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp()
     });
 
     res.json({
       success: true,
       message: 'Purchase successful',
-      escrowed: amount
+      escrowed: parsedAmount,
+      escrowId
     });
 
   } catch (error) {
@@ -233,32 +308,41 @@ router.post('/confirm-delivery', async (req, res) => {
   try {
     const { userId, productId, sellerId, amount } = req.body;
 
+    if (!userId || !productId || !sellerId || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId, productId, sellerId, and amount are required'
+      });
+    }
+
     // Release escrow to seller
     const wallet = new Wallet(userId);
-    await wallet.releaseEscrow(sellerId, amount, productId);
+    const transactionId = await wallet.releaseEscrow(sellerId, parseFloat(amount), productId);
 
     // Update product
-    await admin.firestore().collection('products').doc(productId).update({
+    await db.collection('products').doc(productId).update({
       escrowStatus: 'released',
       deliveryStatus: 'completed',
-      completedAt: admin.firestore.FieldValue.serverTimestamp()
+      completedAt: FieldValue.serverTimestamp(),
+      releaseTransactionId: transactionId
     });
 
     // Update seller stats
-    await admin.firestore().collection('users').doc(sellerId).update({
-      totalSales: admin.firestore.FieldValue.increment(1)
+    await db.collection('users').doc(sellerId).update({
+      totalSales: FieldValue.increment(1)
     });
 
     res.json({
       success: true,
-      message: 'Delivery confirmed, seller paid'
+      message: 'Delivery confirmed, seller paid',
+      transactionId
     });
 
   } catch (error) {
     console.error('Confirm delivery error:', error);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message || 'Failed to confirm delivery'
     });
   }
 });
@@ -268,7 +352,15 @@ router.post('/withdraw', async (req, res) => {
   try {
     const { userId, amount, bankCode, accountNumber, accountName } = req.body;
 
-    if (!amount || amount < 1000) {
+    if (!userId || !amount || !bankCode || !accountNumber || !accountName) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId, amount, bankCode, accountNumber, and accountName are required'
+      });
+    }
+
+    const parsedAmount = parseFloat(amount);
+    if (parsedAmount < 1000) {
       return res.status(400).json({
         success: false,
         message: 'Minimum withdrawal is ₦1,000'
@@ -278,7 +370,7 @@ router.post('/withdraw', async (req, res) => {
     const wallet = new Wallet(userId);
     const walletData = await wallet.getOrCreate();
 
-    if (walletData.balance < amount) {
+    if ((walletData.balance || 0) < parsedAmount) {
       return res.status(400).json({
         success: false,
         message: 'Insufficient balance',
@@ -287,82 +379,110 @@ router.post('/withdraw', async (req, res) => {
     }
 
     // Create transfer recipient
-    const recipientResponse = await axios.post(
-      'https://api.paystack.co/transferrecipient',
-      {
-        type: 'nuban',
-        name: accountName,
-        account_number: accountNumber,
-        bank_code: bankCode,
-        currency: 'NGN'
-      },
-      {
-        headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
-      }
-    );
+    let recipientResponse;
+    try {
+      recipientResponse = await axios.post(
+        'https://api.paystack.co/transferrecipient',
+        {
+          type: 'nuban',
+          name: accountName,
+          account_number: accountNumber,
+          bank_code: bankCode,
+          currency: 'NGN'
+        },
+        {
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+        }
+      );
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.response?.data?.message || 'Failed to create transfer recipient'
+      });
+    }
 
     const recipientCode = recipientResponse.data.data.recipient_code;
+    const withdrawalReference = `WD_${Date.now()}_${userId.substr(0, 6)}`;
 
     // Initiate transfer
-    const transferResponse = await axios.post(
-      'https://api.paystack.co/transfer',
-      {
-        source: 'balance',
-        amount: Math.round(amount * 100),
-        recipient: recipientCode,
-        reason: 'Seller payout from True Ads',
-        reference: `WD_${Date.now()}_${userId.substr(0, 6)}`
-      },
-      {
-        headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
-      }
-    );
+    let transferResponse;
+    try {
+      transferResponse = await axios.post(
+        'https://api.paystack.co/transfer',
+        {
+          source: 'balance',
+          amount: Math.round(parsedAmount * 100),
+          recipient: recipientCode,
+          reason: 'Seller payout from True Ads',
+          reference: withdrawalReference
+        },
+        {
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+        }
+      );
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.response?.data?.message || 'Transfer initiation failed'
+      });
+    }
 
-    // Debit wallet
-    await wallet.debit(amount, {
+    // Debit wallet only after transfer is initiated
+    await wallet.debit(parsedAmount, {
       purpose: 'withdrawal',
-      reference: transferResponse.data.data.reference,
+      reference: withdrawalReference,
       recipientCode,
-      bankDetails: { bankCode, accountNumber, accountName }
+      bankDetails: { bankCode, accountNumber, accountName },
+      paystackTransferRef: transferResponse.data.data.reference
     });
 
     res.json({
       success: true,
       message: 'Withdrawal initiated',
-      reference: transferResponse.data.data.reference,
-      status: transferResponse.data.data.status
+      reference: withdrawalReference,
+      status: transferResponse.data.data.status,
+      transferReference: transferResponse.data.data.reference
     });
 
   } catch (error) {
     console.error('Withdrawal error:', error);
     res.status(500).json({
       success: false,
-      message: error.response?.data?.message || 'Withdrawal failed'
+      message: error.message || 'Withdrawal failed'
     });
   }
 });
 
-// Get wallet balance and history
+// Get wallet balance and history (using subcollection)
 router.get('/wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+    const { limit = 50, startAfter } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId is required'
+      });
+    }
+
     const wallet = new Wallet(userId);
     const data = await wallet.getOrCreate();
-    
-    // Get recent transactions (last 50)
-    const transactions = (data.transactions || [])
-      .sort((a, b) => b.timestamp?.seconds - a.timestamp?.seconds)
-      .slice(0, 50);
+
+    // Get transactions from subcollection
+    const transactions = await wallet.getTransactions(parseInt(limit), startAfter);
 
     res.json({
       success: true,
       wallet: {
-        balance: data.balance,
-        escrowed: data.escrowed,
-        totalEarned: data.totalEarned,
-        totalSpent: data.totalSpent,
-        totalWithdrawn: data.totalWithdrawn,
-        currency: data.currency
+        balance: data.balance || 0,
+        escrowed: data.escrowed || 0,
+        totalEarned: data.totalEarned || 0,
+        totalSpent: data.totalSpent || 0,
+        totalWithdrawn: data.totalWithdrawn || 0,
+        totalDeposited: data.totalDeposited || 0,
+        currency: data.currency || 'NGN',
+        transactionCount: data.transactionCount || 0
       },
       transactions
     });
@@ -371,7 +491,7 @@ router.get('/wallet/:userId', async (req, res) => {
     console.error('Get wallet error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to load wallet'
+      message: error.message || 'Failed to load wallet'
     });
   }
 });
@@ -388,9 +508,10 @@ router.get('/banks', async (req, res) => {
       banks: response.data.data
     });
   } catch (error) {
+    console.error('Get banks error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to load banks'
+      message: error.response?.data?.message || 'Failed to load banks'
     });
   }
 });
@@ -399,7 +520,14 @@ router.get('/banks', async (req, res) => {
 router.post('/verify-account', async (req, res) => {
   try {
     const { accountNumber, bankCode } = req.body;
-    
+
+    if (!accountNumber || !bankCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'accountNumber and bankCode are required'
+      });
+    }
+
     const response = await axios.get(
       `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
       {
@@ -409,12 +537,15 @@ router.post('/verify-account', async (req, res) => {
 
     res.json({
       success: true,
-      accountName: response.data.data.account_name
+      accountName: response.data.data.account_name,
+      accountNumber: response.data.data.account_number,
+      bankCode: response.data.data.bank_id
     });
   } catch (error) {
+    console.error('Verify account error:', error);
     res.status(400).json({
       success: false,
-      message: 'Account verification failed'
+      message: error.response?.data?.message || 'Account verification failed'
     });
   }
 });
