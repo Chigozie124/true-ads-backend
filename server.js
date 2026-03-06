@@ -8,7 +8,6 @@ import escrowRoutes from './routes/escrow.js';
 import withdrawRoutes from './routes/withdraw.js';
 import walletRoutes from './routes/wallet.js';
 
-
 const app = express();
 
 /* -------------------- Middleware -------------------- */
