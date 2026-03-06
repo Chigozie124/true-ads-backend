@@ -12,8 +12,13 @@ const app = express();
 
 /* -------------------- Middleware -------------------- */
 
-// Allow requests
-app.use(cors());
+// CORS - Allow all origins with credentials
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
 
 // Parse JSON body
 app.use(express.json());
@@ -21,7 +26,7 @@ app.use(express.json());
 /* -------------------- Routes -------------------- */
 
 app.get('/', (req, res) => {
-  res.send('True Ads Backend Running');
+    res.send('True Ads Backend Running');
 });
 
 app.use('/api/payment', paymentRoutes);
@@ -32,11 +37,11 @@ app.use('/api/wallet', walletRoutes);
 /* -------------------- Health Check -------------------- */
 
 app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'OK',
-    service: 'true-ads-backend',
-    time: new Date().toISOString()
-  });
+    res.status(200).json({
+        status: 'OK',
+        service: 'true-ads-backend',
+        time: new Date().toISOString()
+    });
 });
 
 /* -------------------- Start Server -------------------- */
@@ -44,5 +49,6 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+    console.log('Server running on port ' + PORT);
 });
+
