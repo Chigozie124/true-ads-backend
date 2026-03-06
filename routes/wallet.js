@@ -180,7 +180,18 @@ class Wallet {
   }
 }
 
-// ==================== ROUTE HANDLERS (New Code) ====================
+// ==================== PUBLIC ROUTE (No Auth Required) ====================
+
+// Health check - PUBLIC, no authentication
+router.get('/health', (req, res) => {
+    res.json({ 
+        status: 'Wallet API OK', 
+        time: new Date().toISOString(),
+        message: 'Wallet API is running'
+    });
+});
+
+// ==================== PROTECTED ROUTES (Require Authentication) ====================
 
 // Get wallet data
 router.get('/:userId', authenticateToken, async (req, res) => {
@@ -413,11 +424,6 @@ router.post('/virtual-account', authenticateToken, async (req, res) => {
         console.error('Virtual account error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
-});
-
-// Health check
-router.get('/health', (req, res) => {
-    res.json({ status: 'Wallet API OK', time: new Date().toISOString() });
 });
 
 export default router;
