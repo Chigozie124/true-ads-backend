@@ -1,4 +1,4 @@
-import { db } from "./firebaseAdmin.js";
+import { db } from "../firebase.js";  // Fixed: was ./firebaseAdmin.js
 
 export default async function ensureUser(uid, email) {
   const ref = db.collection("users").doc(uid);
@@ -12,3 +12,4 @@ export default async function ensureUser(uid, email) {
     });
   }
 }
+

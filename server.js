@@ -6,6 +6,7 @@ import cors from 'cors';
 import paymentRoutes from './routes/payment.js';
 import escrowRoutes from './routes/escrow.js';
 import withdrawRoutes from './routes/withdraw.js';
+import userRoutes from './routes/user.js';
 import walletRoutes from './routes/wallet.js';
 
 const app = express();
@@ -32,6 +33,7 @@ app.get('/', (req, res) => {
 app.use('/api/payment', paymentRoutes);
 app.use('/api/escrow', escrowRoutes);
 app.use('/api/withdraw', withdrawRoutes);
+app.use('/api/user', userRoutes);
 app.use('/api/wallet', walletRoutes);
 
 /* -------------------- Health Check -------------------- */
