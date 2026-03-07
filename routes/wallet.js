@@ -322,6 +322,13 @@ router.post('/virtual-account', authenticateToken, async (req, res) => {
       });
     }
 
+    if (!process.env.PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'Paystack secret key is missing'
+      });
+    }
+
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
     const userDoc = await userRef.get();
@@ -335,31 +342,112 @@ router.post('/virtual-account', authenticateToken, async (req, res) => {
 
     const userData = userDoc.data() || {};
 
-    if (userData.virtualAccount) {
+    if (
+      userData.virtualAccount &&
+      userData.virtualAccount.accountNumber &&
+      userData.virtualAccount.bankName &&
+      userData.virtualAccount.provider === 'paystack' &&
+      userData.virtualAccount.dedicatedAccountId
+    ) {
       return res.json({
         success: true,
-        bankName: userData.virtualAccount.bankName || 'Wema Bank',
-        accountNumber: userData.virtualAccount.accountNumber || '',
+        bankName: userData.virtualAccount.bankName,
+        accountNumber: userData.virtualAccount.accountNumber,
         accountName: userData.virtualAccount.accountName || 'True Ads User',
-        provider: userData.virtualAccount.provider || 'paystack'
+        provider: userData.virtualAccount.provider,
+        customerCode: userData.virtualAccount.customerCode || null,
+        dedicatedAccountId: userData.virtualAccount.dedicatedAccountId || null
       });
     }
 
-    const fallbackName =
+    const email = String(userData.email || '').trim();
+    const fullName = String(
       userData.fullName ||
       userData.displayName ||
       userData.name ||
-      userData.email ||
-      'User';
+      ''
+    ).trim();
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'User email is required for virtual account creation'
+      });
+    }
+
+    const nameParts = fullName.split(' ').filter(Boolean);
+    const firstName = nameParts[0] || 'True';
+    const lastName = nameParts.slice(1).join(' ') || 'Ads';
+
+    let customerCode = userData.paystackCustomerCode || null;
+
+    if (!customerCode) {
+      const customerResponse = await fetch('https://api.paystack.co/customer', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email,
+          first_name: firstName,
+          last_name: lastName,
+          phone: userData.phone || undefined
+        })
+      });
+
+      const customerData = await customerResponse.json();
+
+      if (!customerResponse.ok || !customerData.status) {
+        return res.status(400).json({
+          success: false,
+          message: customerData.message || 'Failed to create Paystack customer'
+        });
+      }
+
+      customerCode = customerData.data.customer_code;
+
+      await userRef.set({
+        paystackCustomerCode: customerCode
+      }, { merge: true });
+    }
+
+    const dedicatedResponse = await fetch('https://api.paystack.co/dedicated_account', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        customer: customerCode,
+        preferred_bank: 'wema-bank'
+      })
+    });
+
+    const dedicatedData = await dedicatedResponse.json();
+
+    if (!dedicatedResponse.ok || !dedicatedData.status) {
+      return res.status(400).json({
+        success: false,
+        message: dedicatedData.message || 'Failed to create dedicated account'
+      });
+    }
+
+    const account = dedicatedData.data || {};
 
     const virtualAccount = {
-      accountNumber: '1234567890',
-      bankName: 'Wema Bank',
-      accountName: `True Ads - ${fallbackName}`,
-      provider: 'paystack'
+      accountName: account.account_name || `True Ads - ${fullName || email}`,
+      accountNumber: account.account_number || '',
+      bankName: account.bank?.name || 'Wema Bank',
+      provider: 'paystack',
+      customerCode,
+      dedicatedAccountId: account.id || null,
+      assignedAt: new Date().toISOString()
     };
 
-    await userRef.set({ virtualAccount }, { merge: true });
+    await userRef.set({
+      virtualAccount
+    }, { merge: true });
 
     res.json({
       success: true,
