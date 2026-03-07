@@ -1,430 +1,377 @@
-// routes/wallet.js - Combined Model + Routes
 import express from 'express';
-import authenticateToken from '../middleware/auth.js';
 import fetch from 'node-fetch';
 import admin from 'firebase-admin';
+import authenticateToken from '../middleware/auth.js';
+import Wallet from '../models/Wallet.js';
 
 const router = express.Router();
 
-// ==================== WALLET CLASS (Your Existing Code) ====================
+router.get('/health', (req, res) => {
+  res.json({
+    status: 'Wallet API OK',
+    time: new Date().toISOString(),
+    message: 'Wallet API is running'
+  });
+});
 
-class Wallet {
-  constructor(userId) {
-    this.userId = userId;
-    this.db = admin.firestore();
-  }
+router.get('/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
 
-  async getOrCreate() {
-    const walletRef = this.db.collection('wallets').doc(this.userId);
-    const wallet = await walletRef.get();
-
-    if (!wallet.exists) {
-      const newWallet = {
-        userId: this.userId,
-        balance: 0,
-        escrowed: 0,
-        totalDeposited: 0,
-        totalWithdrawn: 0,
-        totalEarned: 0,
-        totalSpent: 0,
-        currency: 'NGN',
-        status: 'active',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        transactions: []
-      };
-      await walletRef.set(newWallet);
-      return newWallet;
+    if (!userId || req.user.uid !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
     }
 
-    return wallet.data();
-  }
+    const wallet = new Wallet(userId);
+    const walletData = await wallet.getOrCreate();
+    const transactions = await wallet.getTransactions(50);
 
-  async credit(amount, metadata = {}) {
-    const walletRef = this.db.collection('wallets').doc(this.userId);
-
-    const transaction = {
-      id: `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'credit',
-      amount: parseFloat(amount),
-      ...metadata,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'completed'
+    const stats = {
+      purchases: transactions.filter(t => t.purpose === 'purchase').length,
+      sales: transactions.filter(t => t.source === 'sale').length,
+      totalTransactions: transactions.length
     };
 
-    await this.db.runTransaction(async (t) => {
-      const doc = await t.get(walletRef);
-      const current = doc.data();
-
-      t.update(walletRef, {
-        balance: admin.firestore.FieldValue.increment(parseFloat(amount)),
-        totalDeposited: metadata.source === 'deposit'
-          ? admin.firestore.FieldValue.increment(parseFloat(amount))
-          : current.totalDeposited,
-        totalEarned: metadata.source === 'sale'
-          ? admin.firestore.FieldValue.increment(parseFloat(amount))
-          : current.totalEarned,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        transactions: admin.firestore.FieldValue.arrayUnion(transaction)
-      });
+    res.json({
+      success: true,
+      balance: walletData.balance || 0,
+      escrowed: walletData.escrowed || 0,
+      totalDeposited: walletData.totalDeposited || 0,
+      totalWithdrawn: walletData.totalWithdrawn || 0,
+      totalEarned: walletData.totalEarned || 0,
+      totalSpent: walletData.totalSpent || 0,
+      currency: walletData.currency || 'NGN',
+      status: walletData.status || 'active',
+      stats,
+      transactions
     });
-
-    return transaction;
+  } catch (error) {
+    console.error('Get wallet error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to load wallet'
+    });
   }
+});
 
-  async debit(amount, metadata = {}) {
-    const walletRef = this.db.collection('wallets').doc(this.userId);
+router.post('/deposit/verify', authenticateToken, async (req, res) => {
+  try {
+    const { reference, amount, userId } = req.body;
 
-    const transaction = {
-      id: `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'debit',
-      amount: parseFloat(amount),
-      ...metadata,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'completed'
-    };
+    if (!reference || !amount || !userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'reference, amount and userId are required'
+      });
+    }
 
-    await this.db.runTransaction(async (t) => {
-      const doc = await t.get(walletRef);
-      const current = doc.data();
+    if (req.user.uid !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
 
-      if (current.balance < amount) {
-        throw new Error('Insufficient balance');
+    const paystackResponse = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
+        }
       }
+    );
 
-      t.update(walletRef, {
-        balance: admin.firestore.FieldValue.increment(-parseFloat(amount)),
-        totalSpent: metadata.purpose === 'purchase'
-          ? admin.firestore.FieldValue.increment(parseFloat(amount))
-          : current.totalSpent,
-        totalWithdrawn: metadata.purpose === 'withdrawal'
-          ? admin.firestore.FieldValue.increment(parseFloat(amount))
-          : current.totalWithdrawn,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        transactions: admin.firestore.FieldValue.arrayUnion(transaction)
+    const paystackData = await paystackResponse.json();
+
+    if (paystackData?.data?.status !== 'success') {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed'
       });
+    }
+
+    const paidAmount = (paystackData.data.amount || 0) / 100;
+    const expectedAmount = parseFloat(amount);
+
+    if (Math.abs(paidAmount - expectedAmount) > 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount mismatch detected'
+      });
+    }
+
+    const wallet = new Wallet(userId);
+    const transaction = await wallet.credit(expectedAmount, {
+      source: 'deposit',
+      method: 'Card',
+      reference,
+      description: 'Card Deposit via Paystack'
     });
 
-    return transaction;
-  }
-
-  async holdEscrow(amount, productId) {
-    const walletRef = this.db.collection('wallets').doc(this.userId);
-
-    await this.db.runTransaction(async (t) => {
-      const doc = await t.get(walletRef);
-      const current = doc.data();
-
-      if (current.balance < amount) {
-        throw new Error('Insufficient balance for escrow');
-      }
-
-      t.update(walletRef, {
-        balance: admin.firestore.FieldValue.increment(-parseFloat(amount)),
-        escrowed: admin.firestore.FieldValue.increment(parseFloat(amount)),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
+    res.json({
+      success: true,
+      message: 'Payment verified and wallet credited',
+      transaction
     });
-
-    await this.db.collection('escrows').add({
-      buyerId: this.userId,
-      productId,
-      amount: parseFloat(amount),
-      status: 'held',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+  } catch (error) {
+    console.error('Deposit verify error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Deposit verification failed'
     });
   }
+});
 
-  async releaseEscrow(sellerId, amount, productId) {
-    const buyerWalletRef = this.db.collection('wallets').doc(this.userId);
-    const sellerWalletRef = this.db.collection('wallets').doc(sellerId);
+router.post('/withdraw', authenticateToken, async (req, res) => {
+  try {
+    const { userId, amount, method, accountDetails } = req.body;
+    const parsedAmount = parseFloat(amount);
 
-    await this.db.runTransaction(async (t) => {
-      t.update(buyerWalletRef, {
-        escrowed: admin.firestore.FieldValue.increment(-parseFloat(amount)),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    if (!userId || !parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid userId and amount are required'
       });
+    }
 
-      t.update(sellerWalletRef, {
-        balance: admin.firestore.FieldValue.increment(parseFloat(amount)),
-        totalEarned: admin.firestore.FieldValue.increment(parseFloat(amount)),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    if (req.user.uid !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
       });
+    }
+
+    const wallet = new Wallet(userId);
+    const walletData = await wallet.getOrCreate();
+
+    if ((walletData.balance || 0) < parsedAmount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient balance'
+      });
+    }
+
+    const transaction = await wallet.debit(parsedAmount, {
+      purpose: 'withdrawal',
+      method: method || 'bank',
+      accountDetails: accountDetails || {},
+      description: `Withdrawal to ${method || 'bank'}`
     });
 
-    const escrowQuery = await this.db.collection('escrows')
-      .where('buyerId', '==', this.userId)
-      .where('productId', '==', productId)
-      .where('status', '==', 'held')
+    res.json({
+      success: true,
+      message: 'Withdrawal processed',
+      transaction
+    });
+  } catch (error) {
+    console.error('Withdraw error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Withdrawal failed'
+    });
+  }
+});
+
+router.post('/transfer', authenticateToken, async (req, res) => {
+  try {
+    const { senderId, recipientIdentifier, amount, note } = req.body;
+    const parsedAmount = parseFloat(amount);
+
+    if (!senderId || !recipientIdentifier || !parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'senderId, recipientIdentifier and valid amount are required'
+      });
+    }
+
+    if (req.user.uid !== senderId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    const db = admin.firestore();
+    let recipientId = recipientIdentifier;
+
+    const recipientQuery = await db
+      .collection('users')
+      .where('email', '==', recipientIdentifier)
       .limit(1)
       .get();
 
-    if (!escrowQuery.empty) {
-      await escrowQuery.docs[0].ref.update({
-        status: 'released',
-        releasedAt: admin.firestore.FieldValue.serverTimestamp()
+    if (!recipientQuery.empty) {
+      recipientId = recipientQuery.docs[0].id;
+    }
+
+    if (recipientId === senderId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot transfer to yourself'
       });
     }
 
-    await sellerWalletRef.update({
-      transactions: admin.firestore.FieldValue.arrayUnion({
-        id: `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        type: 'credit',
-        amount: parseFloat(amount),
-        source: 'sale',
-        productId,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'completed'
-      })
+    const senderWallet = new Wallet(senderId);
+    const senderData = await senderWallet.getOrCreate();
+
+    if ((senderData.balance || 0) < parsedAmount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient balance'
+      });
+    }
+
+    await senderWallet.debit(parsedAmount, {
+      purpose: 'transfer',
+      recipient: recipientIdentifier,
+      note: note || '',
+      description: `Transfer to ${recipientIdentifier}`
+    });
+
+    try {
+      const recipientWallet = new Wallet(recipientId);
+      await recipientWallet.getOrCreate();
+      await recipientWallet.credit(parsedAmount, {
+        source: 'transfer',
+        sender: senderId,
+        note: note || '',
+        description: `Received from ${senderId}`
+      });
+    } catch (recipientError) {
+      console.log('Recipient wallet issue:', recipientError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Transfer completed',
+      recipientName: recipientIdentifier
+    });
+  } catch (error) {
+    console.error('Transfer error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Transfer failed'
     });
   }
-}
-
-// ==================== PUBLIC ROUTE (No Auth Required) ====================
-
-// Health check - PUBLIC, no authentication
-router.get('/health', (req, res) => {
-    res.json({ 
-        status: 'Wallet API OK', 
-        time: new Date().toISOString(),
-        message: 'Wallet API is running'
-    });
 });
 
-// ==================== PROTECTED ROUTES (Require Authentication) ====================
-
-// Get wallet data
-router.get('/:userId', authenticateToken, async (req, res) => {
-    try {
-        const { userId } = req.params;
-        
-        if (req.user.uid !== userId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const wallet = new Wallet(userId);
-        const walletData = await wallet.getOrCreate();
-        
-        const stats = {
-            purchases: walletData.transactions?.filter(t => t.purpose === 'purchase').length || 0,
-            sales: walletData.transactions?.filter(t => t.source === 'sale').length || 0,
-            totalTransactions: walletData.transactions?.length || 0
-        };
-        
-        res.json({
-            success: true,
-            balance: walletData.balance || 0,
-            escrowed: walletData.escrowed || 0,
-            stats: stats,
-            transactions: walletData.transactions || []
-        });
-    } catch (error) {
-        console.error('Get wallet error:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Verify Paystack deposit
-router.post('/deposit/verify', authenticateToken, async (req, res) => {
-    try {
-        const { reference, amount, userId } = req.body;
-        
-        if (req.user.uid !== userId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const paystackResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-            headers: { 
-                Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` 
-            }
-        });
-        
-        const paystackData = await paystackResponse.json();
-        
-        if (paystackData.data && paystackData.data.status === 'success') {
-            const wallet = new Wallet(userId);
-            const transaction = await wallet.credit(amount, {
-                source: 'deposit',
-                method: 'Card',
-                reference: reference,
-                description: 'Card Deposit via Paystack'
-            });
-            
-            res.json({ 
-                success: true, 
-                message: 'Payment verified and wallet credited',
-                transaction: transaction
-            });
-        } else {
-            res.status(400).json({ 
-                success: false, 
-                message: 'Payment verification failed'
-            });
-        }
-    } catch (error) {
-        console.error('Deposit verify error:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Withdraw
-router.post('/withdraw', authenticateToken, async (req, res) => {
-    try {
-        const { userId, amount, method, accountDetails } = req.body;
-        
-        if (req.user.uid !== userId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const wallet = new Wallet(userId);
-        const walletData = await wallet.getOrCreate();
-        
-        if (walletData.balance < parseFloat(amount)) {
-            return res.status(400).json({ success: false, message: 'Insufficient balance' });
-        }
-        
-        const transaction = await wallet.debit(amount, {
-            purpose: 'withdrawal',
-            method: method,
-            accountDetails: accountDetails,
-            description: `Withdrawal to ${method}`
-        });
-        
-        res.json({ 
-            success: true, 
-            message: 'Withdrawal processed',
-            transaction: transaction
-        });
-    } catch (error) {
-        console.error('Withdraw error:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Transfer
-router.post('/transfer', authenticateToken, async (req, res) => {
-    try {
-        const { senderId, recipientIdentifier, amount, note } = req.body;
-        
-        if (req.user.uid !== senderId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const db = admin.firestore();
-        let recipientId = recipientIdentifier;
-        let recipientQuery = await db.collection('users').where('email', '==', recipientIdentifier).get();
-        
-        if (!recipientQuery.empty) {
-            recipientId = recipientQuery.docs[0].id;
-        }
-        
-        if (recipientId === senderId) {
-            return res.status(400).json({ success: false, message: 'Cannot transfer to yourself' });
-        }
-        
-        const senderWallet = new Wallet(senderId);
-        const senderData = await senderWallet.getOrCreate();
-        
-        if (senderData.balance < parseFloat(amount)) {
-            return res.status(400).json({ success: false, message: 'Insufficient balance' });
-        }
-        
-        await senderWallet.debit(amount, {
-            purpose: 'transfer',
-            recipient: recipientIdentifier,
-            note: note,
-            description: `Transfer to ${recipientIdentifier}`
-        });
-        
-        try {
-            const recipientWallet = new Wallet(recipientId);
-            await recipientWallet.credit(amount, {
-                source: 'transfer',
-                sender: senderId,
-                note: note,
-                description: `Received from ${senderId}`
-            });
-        } catch (e) {
-            console.log('Recipient wallet issue:', e);
-        }
-        
-        res.json({ 
-            success: true, 
-            message: 'Transfer completed',
-            recipientName: recipientIdentifier 
-        });
-    } catch (error) {
-        console.error('Transfer error:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Subscribe/Upgrade
 router.post('/subscribe', authenticateToken, async (req, res) => {
-    try {
-        const { userId, plan, amount } = req.body;
-        
-        if (req.user.uid !== userId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const wallet = new Wallet(userId);
-        const walletData = await wallet.getOrCreate();
-        
-        if (walletData.balance < parseFloat(amount)) {
-            return res.status(400).json({ success: false, message: 'Insufficient balance' });
-        }
-        
-        await wallet.debit(amount, {
-            purpose: 'subscription',
-            plan: plan,
-            description: `Pro Plan Subscription`
-        });
-        
-        await admin.firestore().collection('users').doc(userId).update({
-            plan: 'pro',
-            planExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-        });
-        
-        res.json({ success: true, message: 'Upgraded to Pro' });
-    } catch (error) {
-        console.error('Subscribe error:', error);
-        res.status(500).json({ success: false, message: error.message });
+  try {
+    const { userId, plan, amount } = req.body;
+    const parsedAmount = parseFloat(amount);
+
+    if (!userId || !plan || !parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId, plan and valid amount are required'
+      });
     }
+
+    if (req.user.uid !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    const wallet = new Wallet(userId);
+    const walletData = await wallet.getOrCreate();
+
+    if ((walletData.balance || 0) < parsedAmount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient balance'
+      });
+    }
+
+    await wallet.debit(parsedAmount, {
+      purpose: 'subscription',
+      plan,
+      description: `${String(plan).toUpperCase()} Plan Subscription`
+    });
+
+    await admin.firestore().collection('users').doc(userId).set({
+      plan: String(plan).toLowerCase(),
+      planExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      message: 'Upgraded successfully'
+    });
+  } catch (error) {
+    console.error('Subscribe error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Subscription failed'
+    });
+  }
 });
 
-// Virtual account
 router.post('/virtual-account', authenticateToken, async (req, res) => {
-    try {
-        const { userId } = req.body;
-        
-        if (req.user.uid !== userId) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
-        }
-        
-        const db = admin.firestore();
-        const userDoc = await db.collection('users').doc(userId).get();
-        const userData = userDoc.data();
-        
-        if (userData.virtualAccount) {
-            return res.json({ success: true, ...userData.virtualAccount });
-        }
-        
-        const virtualAccount = {
-            accountNumber: '1234567890',
-            bankName: 'Wema Bank',
-            accountName: `True Ads - ${userData.email}`,
-            provider: 'paystack'
-        };
-        
-        await db.collection('users').doc(userId).update({ virtualAccount });
-        
-        res.json({ success: true, ...virtualAccount });
-    } catch (error) {
-        console.error('Virtual account error:', error);
-        res.status(500).json({ success: false, message: error.message });
+  try {
+    const { userId } = req.body;
+
+    if (!userId || req.user.uid !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
     }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const userData = userDoc.data() || {};
+
+    if (userData.virtualAccount) {
+      return res.json({
+        success: true,
+        bankName: userData.virtualAccount.bankName || 'Wema Bank',
+        accountNumber: userData.virtualAccount.accountNumber || '',
+        accountName: userData.virtualAccount.accountName || 'True Ads User',
+        provider: userData.virtualAccount.provider || 'paystack'
+      });
+    }
+
+    const fallbackName =
+      userData.fullName ||
+      userData.displayName ||
+      userData.name ||
+      userData.email ||
+      'User';
+
+    const virtualAccount = {
+      accountNumber: '1234567890',
+      bankName: 'Wema Bank',
+      accountName: `True Ads - ${fallbackName}`,
+      provider: 'paystack'
+    };
+
+    await userRef.set({ virtualAccount }, { merge: true });
+
+    res.json({
+      success: true,
+      ...virtualAccount
+    });
+  } catch (error) {
+    console.error('Virtual account error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to load virtual account'
+    });
+  }
 });
 
 export default router;
-

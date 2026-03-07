@@ -1,4 +1,4 @@
-// models/Wallet.js - ES Module Version
+
 import { db, FieldValue } from '../firebase.js';
 
 class Wallet {
@@ -9,9 +9,9 @@ class Wallet {
 
   async getOrCreate() {
     const walletRef = this.db.collection('wallets').doc(this.userId);
-    const wallet = await walletRef.get();
+    const walletDoc = await walletRef.get();
 
-    if (!wallet.exists) {
+    if (!walletDoc.exists) {
       const newWallet = {
         userId: this.userId,
         balance: 0,
@@ -26,22 +26,33 @@ class Wallet {
         updatedAt: FieldValue.serverTimestamp(),
         transactionCount: 0
       };
+
       await walletRef.set(newWallet);
-      return newWallet;
+
+      return {
+        ...newWallet,
+        transactionCount: 0
+      };
     }
 
-    return wallet.data();
+    return walletDoc.data();
   }
 
   async credit(amount, metadata = {}) {
+    const parsedAmount = parseFloat(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      throw new Error('Invalid credit amount');
+    }
+
     const walletRef = this.db.collection('wallets').doc(this.userId);
-    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const now = FieldValue.serverTimestamp();
 
     const transactionData = {
       id: transactionId,
       type: 'credit',
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       ...metadata,
       timestamp: now,
       status: 'completed'
@@ -49,34 +60,43 @@ class Wallet {
 
     await this.db.runTransaction(async (t) => {
       const doc = await t.get(walletRef);
-      const current = doc.data() || {};
+
+      if (!doc.exists) {
+        throw new Error('Wallet not found');
+      }
+
       const isDeposit = metadata.source === 'deposit';
       const isSale = metadata.source === 'sale';
 
       t.update(walletRef, {
-        balance: FieldValue.increment(parseFloat(amount)),
-        totalDeposited: isDeposit ? FieldValue.increment(parseFloat(amount)) : (current.totalDeposited || 0),
-        totalEarned: isSale ? FieldValue.increment(parseFloat(amount)) : (current.totalEarned || 0),
+        balance: FieldValue.increment(parsedAmount),
+        totalDeposited: isDeposit ? FieldValue.increment(parsedAmount) : FieldValue.increment(0),
+        totalEarned: isSale ? FieldValue.increment(parsedAmount) : FieldValue.increment(0),
         updatedAt: now,
         transactionCount: FieldValue.increment(1)
       });
     });
 
-    // Store transaction in subcollection (scalable)
-    await this.db.collection('wallets').doc(this.userId).collection('transactions').doc(transactionId).set(transactionData);
+    await walletRef.collection('transactions').doc(transactionId).set(transactionData);
 
     return transactionData;
   }
 
   async debit(amount, metadata = {}) {
+    const parsedAmount = parseFloat(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      throw new Error('Invalid debit amount');
+    }
+
     const walletRef = this.db.collection('wallets').doc(this.userId);
-    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const now = FieldValue.serverTimestamp();
 
     const transactionData = {
       id: transactionId,
       type: 'debit',
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       ...metadata,
       timestamp: now,
       status: 'completed'
@@ -84,55 +104,75 @@ class Wallet {
 
     await this.db.runTransaction(async (t) => {
       const doc = await t.get(walletRef);
+
+      if (!doc.exists) {
+        throw new Error('Wallet not found');
+      }
+
       const current = doc.data() || {};
 
-      if ((current.balance || 0) < parseFloat(amount)) {
+      if ((current.balance || 0) < parsedAmount) {
         throw new Error('Insufficient balance');
       }
 
       const isPurchase = metadata.purpose === 'purchase';
       const isWithdrawal = metadata.purpose === 'withdrawal';
+      const isSubscription = metadata.purpose === 'subscription';
+      const isTransfer = metadata.purpose === 'transfer';
 
       t.update(walletRef, {
-        balance: FieldValue.increment(-parseFloat(amount)),
-        totalSpent: isPurchase ? FieldValue.increment(parseFloat(amount)) : (current.totalSpent || 0),
-        totalWithdrawn: isWithdrawal ? FieldValue.increment(parseFloat(amount)) : (current.totalWithdrawn || 0),
+        balance: FieldValue.increment(-parsedAmount),
+        totalSpent: (isPurchase || isSubscription || isTransfer)
+          ? FieldValue.increment(parsedAmount)
+          : FieldValue.increment(0),
+        totalWithdrawn: isWithdrawal
+          ? FieldValue.increment(parsedAmount)
+          : FieldValue.increment(0),
         updatedAt: now,
         transactionCount: FieldValue.increment(1)
       });
     });
 
-    // Store transaction in subcollection
-    await this.db.collection('wallets').doc(this.userId).collection('transactions').doc(transactionId).set(transactionData);
+    await walletRef.collection('transactions').doc(transactionId).set(transactionData);
 
     return transactionData;
   }
 
   async holdEscrow(amount, productId) {
+    const parsedAmount = parseFloat(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      throw new Error('Invalid escrow amount');
+    }
+
     const walletRef = this.db.collection('wallets').doc(this.userId);
-    const escrowId = `esc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const escrowId = `esc_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
     await this.db.runTransaction(async (t) => {
       const doc = await t.get(walletRef);
+
+      if (!doc.exists) {
+        throw new Error('Wallet not found');
+      }
+
       const current = doc.data() || {};
 
-      if ((current.balance || 0) < parseFloat(amount)) {
+      if ((current.balance || 0) < parsedAmount) {
         throw new Error('Insufficient balance for escrow');
       }
 
       t.update(walletRef, {
-        balance: FieldValue.increment(-parseFloat(amount)),
-        escrowed: FieldValue.increment(parseFloat(amount)),
+        balance: FieldValue.increment(-parsedAmount),
+        escrowed: FieldValue.increment(parsedAmount),
         updatedAt: FieldValue.serverTimestamp()
       });
     });
 
-    // Create escrow record
     await this.db.collection('escrows').doc(escrowId).set({
       id: escrowId,
       buyerId: this.userId,
       productId,
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       status: 'held',
       createdAt: FieldValue.serverTimestamp()
     });
@@ -141,42 +181,68 @@ class Wallet {
   }
 
   async releaseEscrow(sellerId, amount, productId) {
+    const parsedAmount = parseFloat(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      throw new Error('Invalid release amount');
+    }
+
     const buyerWalletRef = this.db.collection('wallets').doc(this.userId);
     const sellerWalletRef = this.db.collection('wallets').doc(sellerId);
-    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const transactionId = `txn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const now = FieldValue.serverTimestamp();
 
     const sellerTransaction = {
       id: transactionId,
       type: 'credit',
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       source: 'sale',
       productId,
       timestamp: now,
       status: 'completed'
     };
 
-    // ALL OPERATIONS IN SINGLE TRANSACTION - no race conditions
     await this.db.runTransaction(async (t) => {
-      // Release from buyer's escrow
+      const buyerDoc = await t.get(buyerWalletRef);
+      const sellerDoc = await t.get(sellerWalletRef);
+
+      if (!buyerDoc.exists) {
+        throw new Error('Buyer wallet not found');
+      }
+
+      if (!sellerDoc.exists) {
+        t.set(sellerWalletRef, {
+          userId: sellerId,
+          balance: 0,
+          escrowed: 0,
+          totalDeposited: 0,
+          totalWithdrawn: 0,
+          totalEarned: 0,
+          totalSpent: 0,
+          currency: 'NGN',
+          status: 'active',
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+          transactionCount: 0
+        });
+      }
+
       t.update(buyerWalletRef, {
-        escrowed: FieldValue.increment(-parseFloat(amount)),
+        escrowed: FieldValue.increment(-parsedAmount),
         updatedAt: now
       });
 
-      // Credit seller with transaction logged atomically
-      t.update(sellerWalletRef, {
-        balance: FieldValue.increment(parseFloat(amount)),
-        totalEarned: FieldValue.increment(parseFloat(amount)),
+      t.set(sellerWalletRef, {
+        userId: sellerId,
+        balance: FieldValue.increment(parsedAmount),
+        totalEarned: FieldValue.increment(parsedAmount),
         updatedAt: now,
         transactionCount: FieldValue.increment(1)
-      });
+      }, { merge: true });
     });
 
-    // Store seller transaction in subcollection (outside transaction is fine here)
     await sellerWalletRef.collection('transactions').doc(transactionId).set(sellerTransaction);
 
-    // Update escrow record
     const escrowQuery = await this.db.collection('escrows')
       .where('buyerId', '==', this.userId)
       .where('productId', '==', productId)
@@ -194,23 +260,33 @@ class Wallet {
     return transactionId;
   }
 
-  // Get transactions from subcollection (paginated)
   async getTransactions(limit = 50, startAfter = null) {
-    let query = this.db.collection('wallets').doc(this.userId).collection('transactions')
+    let query = this.db
+      .collection('wallets')
+      .doc(this.userId)
+      .collection('transactions')
       .orderBy('timestamp', 'desc')
       .limit(limit);
 
     if (startAfter) {
-      const startDoc = await this.db.collection('wallets').doc(this.userId).collection('transactions').doc(startAfter).get();
+      const startDoc = await this.db
+        .collection('wallets')
+        .doc(this.userId)
+        .collection('transactions')
+        .doc(startAfter)
+        .get();
+
       if (startDoc.exists) {
         query = query.startAfter(startDoc);
       }
     }
 
     const snapshot = await query.get();
-    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    return snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
   }
 }
 
 export default Wallet;
-
