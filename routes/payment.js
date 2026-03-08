@@ -243,12 +243,12 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
       });
     }
 
-    if (parsedAmount < 1000) {
-      return res.status(400).json({
-        success: false,
-        message: 'Minimum withdrawal is ₦1,000'
-      });
-    }
+if (parsedAmount < 100) {
+  return res.status(400).json({
+    success: false,
+    message: 'Minimum withdrawal is ₦100'
+  });
+}
 
     if (req.user.uid !== userId) {
       return res.status(403).json({
