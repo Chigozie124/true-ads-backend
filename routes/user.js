@@ -5,9 +5,10 @@ import ensureUserData from "./ensureUserData.js";
 
 const router = express.Router();
 
-/* ===============================
-   SIGNUP
-================================= */
+function generatePublicId() {
+  return `UID${Math.floor(100000 + Math.random() * 900000)}`;
+}
+
 router.post("/signup", async (req, res) => {
   try {
     const { email, password, fullName } = req.body;
@@ -19,24 +20,23 @@ router.post("/signup", async (req, res) => {
       });
     }
 
-    // 1️⃣ Create Firebase Auth user
     const userRecord = await auth.createUser({
       email,
       password,
-      displayName: fullName,
+      displayName: fullName
     });
 
-    // 2️⃣ Create Firestore user profile
     await db.collection("users").doc(userRecord.uid).set({
       email,
       fullName,
       role: "user",
       banned: false,
-      createdAt: Date.now()
-    });
+      publicId: generatePublicId(),
+      createdAt: Date.now(),
+      lastLogin: Date.now()
+    }, { merge: true });
 
-    // 3️⃣ Auto-create wallet
-    await ensureUserData(userRecord.uid);
+    await ensureUserData(userRecord.uid, email, fullName);
 
     return res.json({
       success: true,
@@ -44,7 +44,6 @@ router.post("/signup", async (req, res) => {
       email,
       fullName
     });
-
   } catch (err) {
     console.error("Signup error:", err);
     return res.status(400).json({
@@ -54,23 +53,28 @@ router.post("/signup", async (req, res) => {
   }
 });
 
-/* ===============================
-   LOGIN
-================================= */
 router.post("/login", async (req, res) => {
-  // Login handled via Firebase client SDK on frontend
   return res.json({
     success: true,
     message: "Login handled on frontend using Firebase SDK"
   });
 });
 
-/* ===============================
-   GET USER PROFILE
-================================= */
 router.get("/profile", verifyToken, async (req, res) => {
   try {
     const uid = req.user.uid;
+    const email = req.user.email || "";
+
+    let fullName = "";
+
+    try {
+      const authUser = await auth.getUser(uid);
+      fullName = authUser.displayName || "";
+    } catch (e) {
+      console.log("Could not fetch auth displayName:", e.message);
+    }
+
+    await ensureUserData(uid, email, fullName);
 
     const doc = await db.collection("users").doc(uid).get();
 
@@ -88,12 +92,46 @@ router.get("/profile", verifyToken, async (req, res) => {
       uid,
       ...user
     });
-
   } catch (err) {
     console.error("Profile error:", err);
     return res.status(500).json({
       success: false,
       error: "Failed to fetch profile"
+    });
+  }
+});
+
+router.post("/ensure", verifyToken, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const email = req.user.email || "";
+
+    let fullName = "";
+
+    try {
+      const authUser = await auth.getUser(uid);
+      fullName = authUser.displayName || "";
+    } catch (e) {
+      console.log("Could not fetch auth displayName:", e.message);
+    }
+
+    await ensureUserData(uid, email, fullName);
+
+    const [userDoc, walletDoc] = await Promise.all([
+      db.collection("users").doc(uid).get(),
+      db.collection("wallets").doc(uid).get()
+    ]);
+
+    return res.json({
+      success: true,
+      user: userDoc.exists ? userDoc.data() : null,
+      wallet: walletDoc.exists ? walletDoc.data() : null
+    });
+  } catch (err) {
+    console.error("Ensure user data error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to ensure user data"
     });
   }
 });
