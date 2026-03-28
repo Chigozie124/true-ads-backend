@@ -10,11 +10,9 @@ if (!admin.apps.length) {
   );
 
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+    credential: admin.credential.cert(serviceAccount)
   });
 }
-
-/* ===== EXPORTS ===== */
 
 export const db = admin.firestore();
 export const auth = admin.auth();
